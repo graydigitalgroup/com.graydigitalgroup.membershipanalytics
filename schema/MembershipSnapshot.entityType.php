@@ -167,6 +167,45 @@ return [
         'label_column' => 'name',
       ],
     ],
+    // As-of demographic dimensions, stamped from the contact dimension history at
+    // period_end so SearchKit can group/filter on them without a date-range join.
+    'gender_id' => [
+      'title' => E::ts('Gender'),
+      'sql_type' => 'int unsigned',
+      'input_type' => 'Select',
+      'description' => E::ts('Contact gender as of the period'),
+      'pseudoconstant' => [
+        'option_group_name' => 'gender',
+      ],
+    ],
+    'country_id' => [
+      'title' => E::ts('Country'),
+      'sql_type' => 'int unsigned',
+      'input_type' => 'Select',
+      'description' => E::ts('Primary-address country as of the period'),
+      'pseudoconstant' => [
+        'table' => 'civicrm_country',
+        'key_column' => 'id',
+        'label_column' => 'name',
+      ],
+    ],
+    'state_province_id' => [
+      'title' => E::ts('State/Province'),
+      'sql_type' => 'int unsigned',
+      'input_type' => 'Select',
+      'description' => E::ts('Primary-address state/province as of the period'),
+      'pseudoconstant' => [
+        'table' => 'civicrm_state_province',
+        'key_column' => 'id',
+        'label_column' => 'name',
+      ],
+    ],
+    'city' => [
+      'title' => E::ts('City'),
+      'sql_type' => 'varchar(64)',
+      'input_type' => 'Text',
+      'description' => E::ts('Primary-address city as of the period'),
+    ],
   ],
   'getIndices' => fn() => [
     'index_period_end' => [
@@ -195,6 +234,14 @@ return [
     ],
     'index_calendar_year' => [
       'fields' => ['calendar_year' => TRUE],
+      'unique' => FALSE,
+    ],
+    'index_gender_period' => [
+      'fields' => ['gender_id' => TRUE, 'period_end' => TRUE],
+      'unique' => FALSE,
+    ],
+    'index_country_period' => [
+      'fields' => ['country_id' => TRUE, 'period_end' => TRUE],
       'unique' => FALSE,
     ],
   ],
