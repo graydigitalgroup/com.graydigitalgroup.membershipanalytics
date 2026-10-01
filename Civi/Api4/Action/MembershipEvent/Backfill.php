@@ -2,21 +2,26 @@
 
 namespace Civi\Api4\Action\MembershipEvent;
 
+use CRM_Membershipanalytics_Config as Config;
+
 /**
  * Rebuild the membership event log from civicrm_membership_log.
  *
  * Walks the core membership log per membership in chronological order and emits one
  * MembershipEvent per meaningful change:
- *  - first row for a membership          -> joined
- *  - membership_type_id changed          -> type_change (transfer), with from/to type
- *  - status_id changed                   -> dropped / archived (by bucket) else status_change
+ *  - first row for a membership -> joined
+ *  - membership_type_id changed -> type_change (transfer), with from/to type
+ *  - status_id changed (type unchanged) -> classified by the before/after status bucket:
+ *      new bucket = dropped        -> dropped
+ *      new bucket = archived       -> archived
+ *      returns to a counting bucket from archived -> reinstated
+ *      returns to a counting bucket from dropped/lapsed/cancelled -> reactivated
+ *      otherwise                   -> status_change
  *
- * Payment-driven reinstated/reactivated events are added by a separate pass that
- * cross-references a completed membership contribution at the transition date (see
- * design §9.1); go-forward they come from OrderCompletedSubscriber.
+ * Go-forward, reinstated/reactivated come from OrderCompletedSubscriber (CNS layer)
+ * with the payment linked; this backfill approximates them from the log transition.
  *
  * Safe to re-run: bounded by fromDate/toDate; with $replace it clears the range first.
- * This is a rebuild from the log, so it should be run deliberately, not routinely.
  */
 class Backfill extends \Civi\Api4\Generic\AbstractAction {
 
@@ -28,7 +33,7 @@ class Backfill extends \Civi\Api4\Generic\AbstractAction {
   protected $fromDate;
 
   /**
-   * Latest modified_date to process (inclusive-ish). Defaults to now.
+   * Latest modified_date to process (inclusive). Defaults to now.
    *
    * @var string
    */
@@ -42,31 +47,160 @@ class Backfill extends \Civi\Api4\Generic\AbstractAction {
   protected $replace = FALSE;
 
   /**
+   * How many event rows to buffer before each bulk insert.
+   *
+   * @var int
+   */
+  protected $batchSize = 2000;
+
+  /**
    * @param \Civi\Api4\Generic\Result $result
    *
    * @throws \CRM_Core_Exception
    */
   public function _run(\Civi\Api4\Generic\Result $result) {
     $from = $this->fromDate ?: $this->earliestLogDate();
-    $to = $this->toDate;
+    $to = date('Y-m-d H:i:s', strtotime($this->toDate) ?: time());
 
+    $sourceId = $this->optionValues('membershipanalytics_source')['log_backfill'];
     if ($this->replace) {
-      \Civi\Api4\MembershipEvent::delete(FALSE)
-        ->addWhere('source:name', '=', 'log_backfill')
-        ->addWhere('effective_date', '>=', $from)
-        ->addWhere('effective_date', '<=', $to)
-        ->execute();
+      // Full rebuild: clear all prior log-backfill events. A range-bounded delete
+      // would leave duplicates, since joined events may be dated before the processed
+      // range (they use the membership's join_date).
+      \CRM_Core_DAO::executeQuery('DELETE FROM civicrm_membership_event WHERE source = %1', [1 => [$sourceId, 'Integer']]);
     }
 
-    // TODO (install+test pass): read civicrm_membership_log ordered by
-    // membership_id, modified_date, id; diff consecutive rows per membership and
-    // emit MembershipEvent rows (joined / type_change / dropped / archived /
-    // status_change) with fiscal_year + calendar_year from Config, source =
-    // log_backfill. Bulk-insert in chunks. Then run the payment-driven
-    // reinstated/reactivated pass. Reconcile counts against civicrm_membership.
-    $written = 0;
+    $classification = Config::getStatusClassification();
+    $eventTypeId = $this->optionValues('membership_event_type');
+    $fys = Config::fiscalYearStart();
+    $fStartM = $fys['M'];
+    $fStartD = $fys['d'];
+    $counting = ['new' => 1, 'current' => 1, 'grace' => 1];
 
-    $result[] = ['from' => $from, 'to' => $to, 'events_written' => $written];
+    $dao = \CRM_Core_DAO::executeQuery(
+      'SELECT ml.membership_id AS mid, m.contact_id AS cid, ml.status_id AS sid,
+              ml.membership_type_id AS tid, ml.modified_date AS md, m.join_date AS jd
+       FROM civicrm_membership_log ml
+       LEFT JOIN civicrm_membership m ON m.id = ml.membership_id
+       WHERE ml.modified_date >= %1 AND ml.modified_date <= %2
+       ORDER BY ml.membership_id, ml.modified_date, ml.id',
+      [1 => [$from, 'String'], 2 => [$to, 'String']]
+    );
+
+    $buffer = [];
+    $written = 0;
+    $byType = [];
+    $prevMid = NULL;
+    $prevSid = NULL;
+    $prevTid = NULL;
+
+    while ($dao->fetch()) {
+      $mid = (int) $dao->mid;
+      $cid = $dao->cid !== NULL ? (string) (int) $dao->cid : 'NULL';
+      $sid = (int) $dao->sid;
+      $tid = (int) $dao->tid;
+      $md = $dao->md;
+      $jd = $dao->jd;
+
+      // Each event: [eventType, fromStatus, toStatus, fromType, toType, effectiveDate]
+      $events = [];
+      if ($mid !== $prevMid) {
+        // Use the membership's own join_date for "member since" where available;
+        // the first log row only dates from when logging began.
+        $events[] = ['joined', NULL, $sid, NULL, $tid, ($jd ?: $md)];
+      }
+      else {
+        $typeChanged = ($prevTid !== $tid);
+        $statusChanged = ($prevSid !== $sid);
+        if ($typeChanged) {
+          $events[] = ['type_change', $prevSid, $sid, $prevTid, $tid, $md];
+        }
+        elseif ($statusChanged) {
+          $prevBucket = $classification[$prevSid] ?? 'lapsed';
+          $newBucket = $classification[$sid] ?? 'lapsed';
+          if ($newBucket === 'dropped') {
+            $et = 'dropped';
+          }
+          elseif ($newBucket === 'archived') {
+            $et = 'archived';
+          }
+          elseif (isset($counting[$newBucket]) && $prevBucket === 'archived') {
+            $et = 'reinstated';
+          }
+          elseif (isset($counting[$newBucket]) && in_array($prevBucket, ['dropped', 'lapsed', 'cancelled'], TRUE)) {
+            $et = 'reactivated';
+          }
+          else {
+            $et = 'status_change';
+          }
+          $events[] = [$et, $prevSid, $sid, NULL, NULL, $md];
+        }
+      }
+
+      foreach ($events as [$etName, $fromS, $toS, $fromT, $toT, $effDate]) {
+        $cy = (int) substr($effDate, 0, 4);
+        $mo = (int) substr($effDate, 5, 2);
+        $dy = (int) substr($effDate, 8, 2);
+        $fy = ($mo > $fStartM || ($mo === $fStartM && $dy >= $fStartD)) ? $cy + 1 : $cy;
+        $buffer[] = sprintf(
+          "(%d,%s,%d,%s,%s,%s,%s,'%s',%d,%d,%d,NOW())",
+          $mid,
+          $cid,
+          $eventTypeId[$etName],
+          $fromS === NULL ? 'NULL' : (int) $fromS,
+          $toS === NULL ? 'NULL' : (int) $toS,
+          $fromT === NULL ? 'NULL' : (int) $fromT,
+          $toT === NULL ? 'NULL' : (int) $toT,
+          \CRM_Core_DAO::escapeString($effDate),
+          $fy,
+          $cy,
+          $sourceId
+        );
+        $byType[$etName] = ($byType[$etName] ?? 0) + 1;
+      }
+
+      $prevMid = $mid;
+      $prevSid = $sid;
+      $prevTid = $tid;
+
+      if (count($buffer) >= $this->batchSize) {
+        $this->flush($buffer);
+        $written += count($buffer);
+        $buffer = [];
+      }
+    }
+    if ($buffer) {
+      $this->flush($buffer);
+      $written += count($buffer);
+    }
+
+    $result[] = ['from' => $from, 'to' => $to, 'events_written' => $written, 'by_type' => $byType];
+  }
+
+  /**
+   * Bulk-insert a batch of pre-formatted VALUES tuples.
+   */
+  protected function flush(array $rows): void {
+    $sql = 'INSERT INTO civicrm_membership_event
+      (membership_id, contact_id, event_type, from_status_id, to_status_id,
+       from_type_id, to_type_id, effective_date, fiscal_year, calendar_year, source, created_date)
+      VALUES ' . implode(',', $rows);
+    \CRM_Core_DAO::executeQuery($sql);
+  }
+
+  /**
+   * name => stored integer value, for an option group.
+   */
+  protected function optionValues(string $group): array {
+    $out = [];
+    $ovs = \Civi\Api4\OptionValue::get(FALSE)
+      ->addSelect('name', 'value')
+      ->addWhere('option_group_id:name', '=', $group)
+      ->execute();
+    foreach ($ovs as $ov) {
+      $out[$ov['name']] = (int) $ov['value'];
+    }
+    return $out;
   }
 
   /**
