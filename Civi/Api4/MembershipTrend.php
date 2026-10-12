@@ -33,6 +33,17 @@ class MembershipTrend extends Generic\SqlView {
   }
 
   /**
+   * Allow read for any CiviCRM user; this view holds only aggregate counts by category, status
+   * bucket and period — no contact-level data — so it needs no stronger restriction than general
+   * back-office access. Write actions are not applicable to a view and keep the restrictive default.
+   */
+  public static function permissions() {
+    $permissions = parent::permissions();
+    $permissions['get'] = ['access CiviCRM'];
+    return $permissions;
+  }
+
+  /**
    * Rebuild the view atomically on every Api4 entityTypes cache rebuild.
    *
    * The base handler does DROP VIEW then CREATE VIEW in two statements, which race under
