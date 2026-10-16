@@ -48,6 +48,17 @@ return [
         'on_delete' => 'SET NULL',
       ],
     ],
+    'membership_type_id' => [
+      'title' => E::ts('Membership Type'),
+      'sql_type' => 'int unsigned',
+      'input_type' => 'Select',
+      'description' => E::ts('Membership type as of the event (the log row\'s type), so flows attribute to a category without re-joining the core log. from_type_id/to_type_id carry the endpoints of a transfer.'),
+      'pseudoconstant' => [
+        'table' => 'civicrm_membership_type',
+        'key_column' => 'id',
+        'label_column' => 'name',
+      ],
+    ],
     'event_type' => [
       'title' => E::ts('Event Type'),
       'sql_type' => 'int unsigned',
@@ -177,6 +188,10 @@ return [
     ],
     'index_totype_effective' => [
       'fields' => ['to_type_id' => TRUE, 'effective_date' => TRUE],
+      'unique' => FALSE,
+    ],
+    'index_type_effective' => [
+      'fields' => ['membership_type_id' => TRUE, 'effective_date' => TRUE],
       'unique' => FALSE,
     ],
   ],

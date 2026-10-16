@@ -105,6 +105,39 @@ final class CRM_Membershipanalytics_Upgrader extends \CRM_Extension_Upgrader_Bas
   // public function processPart3($arg5) { sleep(10); return TRUE; }
 
   /**
+   * Add the as-of membership_type_id column to the event log so flows attribute to a
+   * category without re-joining the core membership log. Guarded so it is a no-op if the
+   * schema mixin has already added the column from the entityType definition. Populate it
+   * by re-running MembershipEvent.Backfill.
+   */
+  public function upgrade_1100(): bool {
+    $this->ctx->log->info('Applying update 1100 - add membership_type_id to civicrm_membership_event');
+    $table = 'civicrm_membership_event';
+    $hasColumn = (bool) CRM_Core_DAO::singleValueQuery(
+      "SELECT COUNT(*) FROM information_schema.columns
+       WHERE table_schema = DATABASE() AND table_name = %1 AND column_name = 'membership_type_id'",
+      [1 => [$table, 'String']]
+    );
+    if (!$hasColumn) {
+      CRM_Core_DAO::executeQuery(
+        "ALTER TABLE `$table` ADD COLUMN `membership_type_id` int unsigned NULL
+           COMMENT 'Membership type as of the event' AFTER `contact_id`"
+      );
+    }
+    $hasIndex = (bool) CRM_Core_DAO::singleValueQuery(
+      "SELECT COUNT(*) FROM information_schema.statistics
+       WHERE table_schema = DATABASE() AND table_name = %1 AND index_name = 'index_type_effective'",
+      [1 => [$table, 'String']]
+    );
+    if (!$hasIndex) {
+      CRM_Core_DAO::executeQuery(
+        "ALTER TABLE `$table` ADD INDEX `index_type_effective` (`membership_type_id`, `effective_date`)"
+      );
+    }
+    return TRUE;
+  }
+
+  /**
    * Example: Run an upgrade with a query that touches many (potentially
    * millions) of records by breaking it up into smaller chunks.
    *
