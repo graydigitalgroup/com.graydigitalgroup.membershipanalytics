@@ -72,6 +72,9 @@ class MembershipReconciliation extends Generic\SqlView {
       ['select' => 'ROW_NUMBER() OVER (ORDER BY recon.fiscal_year, recon.membership_type_id)', 'name' => 'id', 'data_type' => 'Integer'],
       // Reuse the snapshot's field metadata (type pseudoconstant/FK) for these columns.
       ['select' => 'recon.fiscal_year', 'name' => 'fiscal_year', 'original_field' => 'MembershipSnapshot.fiscal_year'],
+      // The fiscal year-end date, so a report can filter by fiscal year with SearchKit's
+      // self-maintaining relative date options ("This fiscal year", etc.).
+      ['select' => 'recon.year_end_date', 'name' => 'fiscal_year_end', 'data_type' => 'Date', 'title' => ts('Fiscal Year End')],
       ['select' => 'recon.membership_type_id', 'name' => 'membership_type_id', 'original_field' => 'MembershipSnapshot.membership_type_id'],
       ['select' => 'recon.opening', 'name' => 'opening', 'data_type' => 'Integer', 'title' => ts('Opening')],
       ['select' => 'recon.entered', 'name' => 'entered', 'data_type' => 'Integer', 'title' => ts('Entered')],
@@ -90,7 +93,8 @@ class MembershipReconciliation extends Generic\SqlView {
     $counting = 'SELECT status_id FROM civicrm_membership_snapshot WHERE counts_as_member = 1 GROUP BY status_id';
 
     // Counted members at each fiscal year-end = the last snapshot in each fiscal_year.
-    $yearEnd = "(SELECT s.fiscal_year, s.membership_type_id, SUM(s.counts_as_member) AS counted
+    $yearEnd = "(SELECT s.fiscal_year, s.membership_type_id, SUM(s.counts_as_member) AS counted,
+                        MAX(s.period_end) AS year_end_date
                  FROM civicrm_membership_snapshot s
                  JOIN (SELECT fiscal_year, MAX(period_end) AS pe
                        FROM civicrm_membership_snapshot GROUP BY fiscal_year) last_period
@@ -149,6 +153,7 @@ class MembershipReconciliation extends Generic\SqlView {
 
     return "FROM (
       SELECT ye.fiscal_year, ye.membership_type_id,
+             ye.year_end_date,
              ye.counted AS current_count,
              COALESCE(op.counted, 0) AS opening,
              COALESCE(fl.entered, 0) AS entered,
