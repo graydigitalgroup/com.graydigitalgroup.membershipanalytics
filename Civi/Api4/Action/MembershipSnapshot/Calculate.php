@@ -13,9 +13,10 @@ use CRM_Membershipanalytics_Config as Config;
  * Bounding by modified_date keeps closed periods stable: a change recorded after a
  * period does not alter that period (design §13.1).
  *
- * Demographic dimensions are intentionally NOT written here — they are stamped by a
- * later step once the Option A/B storage decision is made. This builds membership
- * state only, which is identical in both options.
+ * Membership state is written first; demographic dimensions are then stamped onto the
+ * new rows by MembershipSnapshot.stampDimensions, called at the end of this run (unless
+ * $stampDimensions is turned off). State and dimensions are kept in separate passes so the
+ * dimension set can change without touching the per-period state query.
  *
  * Safe to re-run: without $recalculate it resumes after the latest existing period;
  * with $recalculate it rebuilds the given range.
@@ -57,6 +58,13 @@ class Calculate extends \Civi\Api4\Generic\AbstractAction {
    * @var int
    */
   protected $batchSize = 2000;
+
+  /**
+   * Stamp demographic dimensions onto the new rows after building state.
+   *
+   * @var bool
+   */
+  protected $stampDimensions = TRUE;
 
   /**
    * @param \Civi\Api4\Generic\Result $result
@@ -112,6 +120,24 @@ class Calculate extends \Civi\Api4\Generic\AbstractAction {
       $periods[] = ['period_end' => $this->periodEnd($periodStart)->format('Y-m-d'), 'rows' => $written];
       $periodStart = $this->nextPeriodStart($periodStart);
       $runs++;
+    }
+
+    if ($this->stampDimensions && $totalRows > 0) {
+      // Stamp the fiscal years this run just (re)built, so the stamp pass does not rescan
+      // the whole table. A null fiscal year here would restamp everything.
+      $fyList = [];
+      foreach ($periods as $p) {
+        $pe = new \DateTimeImmutable($p['period_end']);
+        $m = (int) $pe->format('n');
+        $d = (int) $pe->format('j');
+        $y = (int) $pe->format('Y');
+        $fyList[($m > $ctx['fStartM'] || ($m === $ctx['fStartM'] && $d >= $ctx['fStartD'])) ? $y + 1 : $y] = TRUE;
+      }
+      foreach (array_keys($fyList) as $fyYear) {
+        \Civi\Api4\MembershipSnapshot::stampDimensions(FALSE)
+          ->setFiscalYear($fyYear)
+          ->execute();
+      }
     }
 
     $result[] = ['from' => $from, 'to' => $to, 'periods' => count($periods), 'total_rows' => $totalRows];

@@ -138,6 +138,43 @@ final class CRM_Membershipanalytics_Upgrader extends \CRM_Extension_Upgrader_Bas
   }
 
   /**
+   * Add the demographic dimension columns to civicrm_membership_snapshot so they can be
+   * stamped (Option B). The schema definition carries them; this adds any that are not yet
+   * on the installed table. Populate them with MembershipSnapshot.stampDimensions.
+   */
+  public function upgrade_1200(): bool {
+    $this->ctx->log->info('Applying update 1200 - add demographic columns to civicrm_membership_snapshot');
+    $table = 'civicrm_membership_snapshot';
+    $columns = [
+      'gender_id' => "int unsigned NULL COMMENT 'Contact gender as of the period' AFTER `movement_to_type_id`",
+      'country_id' => "int unsigned NULL COMMENT 'Primary address country as of the period' AFTER `gender_id`",
+      'state_province_id' => "int unsigned NULL COMMENT 'Primary address state/province as of the period' AFTER `country_id`",
+      'city' => "varchar(64) NULL COMMENT 'Primary address city as of the period' AFTER `state_province_id`",
+    ];
+    foreach ($columns as $name => $definition) {
+      $exists = (bool) CRM_Core_DAO::singleValueQuery(
+        "SELECT COUNT(*) FROM information_schema.columns
+         WHERE table_schema = DATABASE() AND table_name = %1 AND column_name = %2",
+        [1 => [$table, 'String'], 2 => [$name, 'String']]
+      );
+      if (!$exists) {
+        CRM_Core_DAO::executeQuery("ALTER TABLE `$table` ADD COLUMN `$name` $definition");
+      }
+    }
+    $hasIndex = (bool) CRM_Core_DAO::singleValueQuery(
+      "SELECT COUNT(*) FROM information_schema.statistics
+       WHERE table_schema = DATABASE() AND table_name = %1 AND index_name = 'index_gender_fiscal_year'",
+      [1 => [$table, 'String']]
+    );
+    if (!$hasIndex) {
+      CRM_Core_DAO::executeQuery(
+        "ALTER TABLE `$table` ADD INDEX `index_gender_fiscal_year` (`gender_id`, `fiscal_year`)"
+      );
+    }
+    return TRUE;
+  }
+
+  /**
    * Example: Run an upgrade with a query that touches many (potentially
    * millions) of records by breaking it up into smaller chunks.
    *

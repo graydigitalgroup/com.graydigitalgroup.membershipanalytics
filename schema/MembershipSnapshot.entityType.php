@@ -167,9 +167,48 @@ return [
         'label_column' => 'name',
       ],
     ],
-    // Demographic dimensions (gender/geography/is_fellow) are deferred to the
-    // Option A/B decision and added then (columns or custom fields) via the same
-    // as-of reconstruction logic. The shared snapshot carries membership state only.
+    // Demographic dimensions stamped per period (Option B: config-driven columns, driven by the
+    // membershipanalytics_historized_dimensions setting). These core columns cover the default
+    // dimensions; a site adds more via the dimension manager. Gender is stable, so a current-value
+    // stamp is accurate; geography is the contact's primary address (as-of-from-audit-logs is a
+    // later refinement). Stamped by MembershipSnapshot.stampDimensions.
+    'gender_id' => [
+      'title' => E::ts('Gender'),
+      'sql_type' => 'int unsigned',
+      'input_type' => 'Select',
+      'description' => E::ts('Contact gender as of the period'),
+      'pseudoconstant' => [
+        'option_group_name' => 'gender',
+      ],
+    ],
+    'country_id' => [
+      'title' => E::ts('Country'),
+      'sql_type' => 'int unsigned',
+      'input_type' => 'Select',
+      'description' => E::ts('Primary address country as of the period'),
+      'pseudoconstant' => [
+        'table' => 'civicrm_country',
+        'key_column' => 'id',
+        'label_column' => 'name',
+      ],
+    ],
+    'state_province_id' => [
+      'title' => E::ts('State/Province'),
+      'sql_type' => 'int unsigned',
+      'input_type' => 'Select',
+      'description' => E::ts('Primary address state/province as of the period'),
+      'pseudoconstant' => [
+        'table' => 'civicrm_state_province',
+        'key_column' => 'id',
+        'label_column' => 'name',
+      ],
+    ],
+    'city' => [
+      'title' => E::ts('City'),
+      'sql_type' => 'varchar(64)',
+      'input_type' => 'Text',
+      'description' => E::ts('Primary address city as of the period'),
+    ],
   ],
   'getIndices' => fn() => [
     'index_period_end' => [
@@ -198,6 +237,10 @@ return [
     ],
     'index_calendar_year' => [
       'fields' => ['calendar_year' => TRUE],
+      'unique' => FALSE,
+    ],
+    'index_gender_fiscal_year' => [
+      'fields' => ['gender_id' => TRUE, 'fiscal_year' => TRUE],
       'unique' => FALSE,
     ],
   ],

@@ -112,6 +112,34 @@ class CRM_Membershipanalytics_Config {
   }
 
   /**
+   * Where each historized dimension lives on the snapshot and how to read its value.
+   *
+   * Maps a dimension field key (as returned by historizedDimensions()) to the snapshot
+   * column that holds it and the contact-side source to stamp from. This is the built-in
+   * map for the core demographic dimensions; a site adds its own (e.g. a custom field) by
+   * listening to the dimensionColumnMap event, which is how non-core dimensions — including
+   * CNS's is_fellow — plug a column + source expression into the same stamping engine.
+   *
+   * source: 'contact' stamps from civicrm_contact (joined on id); 'address' stamps from the
+   * contact's primary civicrm_address. expr is a SQL expression against the source alias `src`.
+   *
+   * @return array<string, array{column: string, source: string, expr: string}>
+   */
+  public static function dimensionColumnMap(): array {
+    $map = [
+      'gender' => ['column' => 'gender_id', 'source' => 'contact', 'expr' => 'src.gender_id'],
+      'country' => ['column' => 'country_id', 'source' => 'address', 'expr' => 'src.country_id'],
+      'state' => ['column' => 'state_province_id', 'source' => 'address', 'expr' => 'src.state_province_id'],
+      'city' => ['column' => 'city', 'source' => 'address', 'expr' => 'src.city'],
+    ];
+
+    $event = \Civi\Core\Event\GenericHookEvent::create(['map' => &$map]);
+    \Civi::dispatcher()->dispatch('civi.membershipanalytics.dimensionColumnMap', $event);
+
+    return $map;
+  }
+
+  /**
    * Default status name => lifecycle bucket mapping for CORE CiviCRM statuses only.
    * Custom statuses are resolved via is_current_member, then overridden by the setting
    * or the statusClassification event.
