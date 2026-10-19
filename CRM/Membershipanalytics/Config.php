@@ -160,6 +160,62 @@ class CRM_Membershipanalytics_Config {
   }
 
   /**
+   * Movement reason for a membership's prior status (on entry) and next status (on exit).
+   *
+   * entry: the status a membership held BEFORE it crossed into counting → 'new' | 'reactivated'
+   * | 'reinstated'. exit: the status it moved INTO when it left counting → 'dropped' | 'archived'
+   * | 'other'. Defaults derive from the lifecycle bucket (dropped → reactivated/dropped, archived
+   * → reinstated/archived, everything else → new/other). The reason is deliberately separate from
+   * the bucket, because two lapsed statuses can re-enter for different reasons: a site refines
+   * individual statuses by listening to the movementReason event — e.g. CNS maps In-Arrears to
+   * reactivated and Expired to reinstated without changing their lifecycle bucket.
+   *
+   * @return array{entry: array<int,string>, exit: array<int,string>}
+   */
+  public static function movementReasonByStatus(): array {
+    $classification = self::getStatusClassification();
+    $entry = [];
+    $exit = [];
+    foreach ($classification as $sid => $bucket) {
+      $entry[(int) $sid] = $bucket === 'dropped' ? 'reactivated' : ($bucket === 'archived' ? 'reinstated' : 'new');
+      $exit[(int) $sid] = in_array($bucket, ['dropped', 'archived'], TRUE) ? $bucket : 'other';
+    }
+
+    $event = \Civi\Core\Event\GenericHookEvent::create(['entry' => &$entry, 'exit' => &$exit]);
+    \Civi::dispatcher()->dispatch('civi.membershipanalytics.movementReason', $event);
+
+    return ['entry' => $entry, 'exit' => $exit];
+  }
+
+  /**
+   * Entry-reason status ids as reason => [status_id,...]. A membership entering from a status not
+   * listed here is counted as 'new'.
+   */
+  public static function entryReasonStatusIds(): array {
+    $out = ['reactivated' => [], 'reinstated' => []];
+    foreach (self::movementReasonByStatus()['entry'] as $sid => $reason) {
+      if (isset($out[$reason])) {
+        $out[$reason][] = (int) $sid;
+      }
+    }
+    return $out;
+  }
+
+  /**
+   * Exit-reason status ids as reason => [status_id,...]. A membership exiting into a status not
+   * listed here is counted as 'other'.
+   */
+  public static function exitReasonStatusIds(): array {
+    $out = ['dropped' => [], 'archived' => []];
+    foreach (self::movementReasonByStatus()['exit'] as $sid => $reason) {
+      if (isset($out[$reason])) {
+        $out[$reason][] = (int) $sid;
+      }
+    }
+    return $out;
+  }
+
+  /**
    * Default status name => lifecycle bucket mapping for CORE CiviCRM statuses only.
    * Custom statuses are resolved via is_current_member, then overridden by the setting
    * or the statusClassification event.
@@ -189,17 +245,19 @@ class CRM_Membershipanalytics_Config {
     }
 
     $byName = self::defaultStatusBucketsByName();
-    $statuses = \Civi\Api4\MembershipStatus::get(FALSE)
-      ->addSelect('id', 'name', 'is_current_member')
-      ->execute();
+    // Raw SQL, not APIv4: this is also called while SQL views are being (re)built during the
+    // APIv4 entityTypes rebuild, and an APIv4 call there would re-enter that rebuild and recurse.
+    $dao = \CRM_Core_DAO::executeQuery(
+      'SELECT id, name, is_current_member FROM civicrm_membership_status'
+    );
 
     $map = [];
-    foreach ($statuses as $status) {
-      if (isset($byName[$status['name']])) {
-        $map[$status['id']] = $byName[$status['name']];
+    while ($dao->fetch()) {
+      if (isset($byName[$dao->name])) {
+        $map[(int) $dao->id] = $byName[$dao->name];
       }
       else {
-        $map[$status['id']] = !empty($status['is_current_member']) ? 'current' : 'lapsed';
+        $map[(int) $dao->id] = !empty($dao->is_current_member) ? 'current' : 'lapsed';
       }
     }
 
