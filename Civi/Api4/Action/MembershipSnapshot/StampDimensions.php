@@ -34,20 +34,20 @@ class StampDimensions extends \Civi\Api4\Generic\AbstractAction {
   protected $onlyMissing = FALSE;
 
   public function _run(\Civi\Api4\Generic\Result $result) {
-    $dimensions = Config::historizedDimensions();
-    $map = Config::dimensionColumnMap();
+    // Make sure every active dimension has a column before stamping into it.
+    \Civi\Api4\MembershipSnapshot::syncColumns(FALSE)->execute();
 
-    // Keep only configured dimensions that have a column mapping, grouped by source.
-    $bySource = [];
-    foreach ($dimensions as $dim) {
-      if (isset($map[$dim])) {
-        $bySource[$map[$dim]['source']][$dim] = $map[$dim];
-      }
+    // Group the active dimensions by their JOIN so each distinct source is one UPDATE
+    // (gender from the contact; geography from the primary address; a custom-field table as
+    // its own join). Dimensions that share a join — like the address columns — stamp together.
+    $byJoin = [];
+    foreach (Config::activeDimensions() as $dim => $spec) {
+      $byJoin[$spec['join']][$dim] = $spec;
     }
 
     $stamped = [];
-    foreach ($bySource as $source => $dims) {
-      $affected = $this->stampSource($source, $dims);
+    foreach ($byJoin as $join => $dims) {
+      $affected = $this->stampJoin($join, $dims);
       foreach ($dims as $dim => $spec) {
         $stamped[$dim] = ['column' => $spec['column'], 'rows' => $affected];
       }
@@ -57,14 +57,9 @@ class StampDimensions extends \Civi\Api4\Generic\AbstractAction {
   }
 
   /**
-   * Run one UPDATE that stamps every dimension drawn from the given source.
+   * Run one UPDATE that stamps every dimension sharing the given JOIN.
    */
-  protected function stampSource(string $source, array $dims): int {
-    $join = $this->sourceJoin($source);
-    if ($join === NULL) {
-      return 0;
-    }
-
+  protected function stampJoin(string $join, array $dims): int {
     $sets = [];
     $missingGuards = [];
     foreach ($dims as $spec) {
@@ -94,23 +89,6 @@ class StampDimensions extends \Civi\Api4\Generic\AbstractAction {
     \CRM_Core_DAO::executeQuery($sql);
 
     return $affected;
-  }
-
-  /**
-   * The JOIN clause that exposes a source's row as alias `src` for each snapshot row.
-   */
-  protected function sourceJoin(string $source): ?string {
-    switch ($source) {
-      case 'contact':
-        return 'JOIN civicrm_contact src ON src.id = s.contact_id';
-
-      case 'address':
-        // Primary address; LEFT so a contact without one stamps NULL rather than dropping the row.
-        return 'LEFT JOIN civicrm_address src ON src.contact_id = s.contact_id AND src.is_primary = 1';
-
-      default:
-        return NULL;
-    }
   }
 
 }

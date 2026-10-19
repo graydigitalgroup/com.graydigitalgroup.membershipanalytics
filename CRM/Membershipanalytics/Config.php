@@ -112,31 +112,51 @@ class CRM_Membershipanalytics_Config {
   }
 
   /**
-   * Where each historized dimension lives on the snapshot and how to read its value.
+   * Where each historized dimension lives on the snapshot and how to stamp its value.
    *
-   * Maps a dimension field key (as returned by historizedDimensions()) to the snapshot
-   * column that holds it and the contact-side source to stamp from. This is the built-in
-   * map for the core demographic dimensions; a site adds its own (e.g. a custom field) by
-   * listening to the dimensionColumnMap event, which is how non-core dimensions — including
-   * CNS's is_fellow — plug a column + source expression into the same stamping engine.
+   * Maps a dimension field key (as returned by historizedDimensions()) to its snapshot
+   * column, that column's SQL type, the JOIN that exposes the source row as alias `src`, and
+   * the SQL expression that reads the value. This is the built-in map for the core demographic
+   * dimensions. A site adds its own — any contact-related table, including a custom-field table
+   * — by listening to the dimensionColumnMap event; that is how non-core dimensions such as
+   * CNS's is_fellow plug into the same column-sync and stamping engine without this extension
+   * knowing anything about them. The join is raw SQL against the snapshot alias `s`, so it is
+   * defined in code (an event listener), never from user input.
    *
-   * source: 'contact' stamps from civicrm_contact (joined on id); 'address' stamps from the
-   * contact's primary civicrm_address. expr is a SQL expression against the source alias `src`.
-   *
-   * @return array<string, array{column: string, source: string, expr: string}>
+   * @return array<string, array{column: string, sql_type: string, join: string, expr: string}>
    */
   public static function dimensionColumnMap(): array {
+    $contactJoin = 'JOIN civicrm_contact src ON src.id = s.contact_id';
+    // Primary address; LEFT so a contact without one stamps NULL rather than dropping the row.
+    $addressJoin = 'LEFT JOIN civicrm_address src ON src.contact_id = s.contact_id AND src.is_primary = 1';
     $map = [
-      'gender' => ['column' => 'gender_id', 'source' => 'contact', 'expr' => 'src.gender_id'],
-      'country' => ['column' => 'country_id', 'source' => 'address', 'expr' => 'src.country_id'],
-      'state' => ['column' => 'state_province_id', 'source' => 'address', 'expr' => 'src.state_province_id'],
-      'city' => ['column' => 'city', 'source' => 'address', 'expr' => 'src.city'],
+      'gender' => ['column' => 'gender_id', 'sql_type' => 'int unsigned', 'join' => $contactJoin, 'expr' => 'src.gender_id'],
+      'country' => ['column' => 'country_id', 'sql_type' => 'int unsigned', 'join' => $addressJoin, 'expr' => 'src.country_id'],
+      'state' => ['column' => 'state_province_id', 'sql_type' => 'int unsigned', 'join' => $addressJoin, 'expr' => 'src.state_province_id'],
+      'city' => ['column' => 'city', 'sql_type' => 'varchar(64)', 'join' => $addressJoin, 'expr' => 'src.city'],
     ];
 
     $event = \Civi\Core\Event\GenericHookEvent::create(['map' => &$map]);
     \Civi::dispatcher()->dispatch('civi.membershipanalytics.dimensionColumnMap', $event);
 
     return $map;
+  }
+
+  /**
+   * The dimensions that are both active (historized) and have a column mapping, as
+   * key => spec. This is the working set the column-sync and stamping engine operate on.
+   *
+   * @return array<string, array{column: string, sql_type: string, join: string, expr: string}>
+   */
+  public static function activeDimensions(): array {
+    $map = self::dimensionColumnMap();
+    $active = [];
+    foreach (self::historizedDimensions() as $dim) {
+      if (isset($map[$dim])) {
+        $active[$dim] = $map[$dim];
+      }
+    }
+    return $active;
   }
 
   /**
