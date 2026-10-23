@@ -98,17 +98,32 @@ class CRM_Membershipanalytics_Config {
   /**
    * Contact dimensions to historize (field keys).
    *
-   * Default is CORE demographic fields only. A site adds custom fields via the setting
-   * or by listening to the historizedDimensions event.
+   * The active set is UI-managed: the membershipanalytics_dimensions option group holds one value
+   * per active dimension (an admin adds/removes them on the Membership Dimensions screen, no code).
+   * When that option group has no active values, it falls back to the setting, then to the core
+   * demographic defaults. The historizedDimensions event can still add dimensions programmatically.
    */
   public static function historizedDimensions(): array {
-    $configured = \Civi::settings()->get('membershipanalytics_historized_dimensions');
-    $dimensions = !empty($configured) ? $configured : ['gender', 'country', 'state', 'city'];
+    $fromGroup = \Civi\Api4\OptionValue::get(FALSE)
+      ->addSelect('value')
+      ->addWhere('option_group_id:name', '=', 'membershipanalytics_dimensions')
+      ->addWhere('is_active', '=', TRUE)
+      ->addOrderBy('weight', 'ASC')
+      ->execute()
+      ->column('value');
+
+    if ($fromGroup) {
+      $dimensions = $fromGroup;
+    }
+    else {
+      $configured = \Civi::settings()->get('membershipanalytics_historized_dimensions');
+      $dimensions = !empty($configured) ? $configured : ['gender', 'country', 'state', 'city'];
+    }
 
     $event = \Civi\Core\Event\GenericHookEvent::create(['dimensions' => &$dimensions]);
     \Civi::dispatcher()->dispatch('civi.membershipanalytics.historizedDimensions', $event);
 
-    return $dimensions;
+    return array_values(array_unique($dimensions));
   }
 
   /**
@@ -153,10 +168,122 @@ class CRM_Membershipanalytics_Config {
     $active = [];
     foreach (self::historizedDimensions() as $dim) {
       if (isset($map[$dim])) {
+        // A built-in or event-provided dimension (e.g. gender, geography, or a coded override).
         $active[$dim] = $map[$dim];
+      }
+      else {
+        // Otherwise resolve it generically from field metadata, so a dimension added in the UI
+        // (a custom field or contact field) is stamped with no code.
+        $resolved = self::resolveDimension($dim);
+        if ($resolved) {
+          $active[$dim] = $resolved;
+        }
       }
     }
     return $active;
+  }
+
+  /**
+   * Resolve a dimension field key to {column, sql_type, join, expr} from CiviCRM field metadata,
+   * so any contact custom field (or contact base column) can be a snapshot dimension without a
+   * hand-written mapping. Returns NULL for a key that cannot be stamped onto a per-contact column
+   * (e.g. a custom field on a non-contact entity).
+   *
+   * Accepted keys: a custom field as "custom_<id>" or "<CustomGroupName>.<FieldName>", or a plain
+   * civicrm_contact column name.
+   *
+   * @return array{column: string, sql_type: string, join: string, expr: string}|null
+   */
+  public static function resolveDimension(string $key): ?array {
+    $cf = NULL;
+    if (preg_match('/^custom_(\d+)$/', $key, $m)) {
+      $cf = self::customFieldMeta((int) $m[1], NULL, NULL);
+    }
+    elseif (strpos($key, '.') !== FALSE) {
+      [$group, $field] = explode('.', $key, 2);
+      $cf = self::customFieldMeta(NULL, $group, $field);
+    }
+
+    if ($cf) {
+      // Must extend a contact type so it joins on entity_id = contact_id.
+      if (!in_array($cf['extends'], ['Contact', 'Individual', 'Organization', 'Household'], TRUE)) {
+        return NULL;
+      }
+      return [
+        'column' => $cf['column_name'],
+        'sql_type' => self::sqlTypeForDataType($cf['data_type']),
+        'join' => 'LEFT JOIN `' . $cf['table_name'] . '` src ON src.entity_id = s.contact_id',
+        'expr' => 'src.`' . $cf['column_name'] . '`',
+      ];
+    }
+
+    // A plain civicrm_contact column (validated against information_schema to stay injection-safe).
+    if (preg_match('/^[a-z_][a-z0-9_]*$/', $key)) {
+      $type = \CRM_Core_DAO::singleValueQuery(
+        "SELECT column_type FROM information_schema.columns
+         WHERE table_schema = DATABASE() AND table_name = 'civicrm_contact' AND column_name = %1",
+        [1 => [$key, 'String']]
+      );
+      if ($type) {
+        return [
+          'column' => $key,
+          'sql_type' => $type,
+          'join' => 'JOIN civicrm_contact src ON src.id = s.contact_id',
+          'expr' => 'src.`' . $key . '`',
+        ];
+      }
+    }
+    return NULL;
+  }
+
+  /**
+   * Custom field metadata (column_name, data_type, group table_name + extends), by id or by
+   * group name + field name. Returns NULL if not found.
+   */
+  private static function customFieldMeta(?int $id, ?string $groupName, ?string $fieldName): ?array {
+    $query = \Civi\Api4\CustomField::get(FALSE)
+      ->addSelect('column_name', 'data_type', 'custom_group_id.table_name', 'custom_group_id.extends')
+      ->setLimit(1);
+    if ($id) {
+      $query->addWhere('id', '=', $id);
+    }
+    else {
+      $query->addWhere('custom_group_id.name', '=', $groupName)->addWhere('name', '=', $fieldName);
+    }
+    $cf = $query->execute()->first();
+    if (!$cf) {
+      return NULL;
+    }
+    return [
+      'column_name' => $cf['column_name'],
+      'data_type' => $cf['data_type'],
+      'table_name' => $cf['custom_group_id.table_name'],
+      'extends' => $cf['custom_group_id.extends'],
+    ];
+  }
+
+  /**
+   * SQL column type for a CiviCRM custom-field data type.
+   */
+  private static function sqlTypeForDataType(string $dataType): string {
+    switch ($dataType) {
+      case 'Int':
+      case 'Boolean':
+      case 'StateProvince':
+      case 'Country':
+      case 'ContactReference':
+        return 'int';
+
+      case 'Float':
+      case 'Money':
+        return 'decimal(20,2)';
+
+      case 'Date':
+        return 'datetime';
+
+      default:
+        return 'varchar(255)';
+    }
   }
 
   /**
