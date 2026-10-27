@@ -287,6 +287,65 @@ class CRM_Membershipanalytics_Config {
   }
 
   /**
+   * APIv4 field definitions for the snapshot's dynamically added dimension columns.
+   *
+   * The entity's static getFields() lists the fixed columns; this reads the live table and returns
+   * a field definition for every other column (the dimensions added by MembershipSnapshot.syncColumns,
+   * e.g. is_fellow or anything configured in the UI dimension manager), so SearchKit and APIv4 can
+   * select, group and filter on them. Raw SQL on information_schema, not APIv4, because this runs
+   * while entity metadata is being built.
+   *
+   * @param array $excludeColumns Column names already defined as static fields, to skip.
+   * @return array<string, array> name => field definition
+   */
+  public static function snapshotDimensionFields(array $excludeColumns): array {
+    $exclude = array_map('strtolower', $excludeColumns);
+    $fields = [];
+    $dao = \CRM_Core_DAO::executeQuery(
+      "SELECT column_name, data_type, column_type FROM information_schema.columns
+       WHERE table_schema = DATABASE() AND table_name = 'civicrm_membership_snapshot'
+       ORDER BY ordinal_position"
+    );
+    while ($dao->fetch()) {
+      if (in_array(strtolower($dao->column_name), $exclude, TRUE)) {
+        continue;
+      }
+      $fields[$dao->column_name] = [
+        'title' => ucwords(str_replace('_', ' ', $dao->column_name)),
+        'sql_type' => $dao->column_type,
+        'input_type' => self::inputTypeForColumnType($dao->data_type),
+        'description' => 'Stamped membership-snapshot dimension.',
+      ];
+    }
+    return $fields;
+  }
+
+  /**
+   * APIv4 input type for a MySQL column data type (information_schema data_type).
+   */
+  private static function inputTypeForColumnType(string $dataType): string {
+    switch (strtolower($dataType)) {
+      case 'date':
+      case 'datetime':
+      case 'timestamp':
+        return 'Select Date';
+
+      case 'tinyint':
+      case 'smallint':
+      case 'mediumint':
+      case 'int':
+      case 'bigint':
+      case 'decimal':
+      case 'float':
+      case 'double':
+        return 'Number';
+
+      default:
+        return 'Text';
+    }
+  }
+
+  /**
    * Movement reason for a membership's prior status (on entry) and next status (on exit).
    *
    * entry: the status a membership held BEFORE it crossed into counting → 'new' | 'reactivated'

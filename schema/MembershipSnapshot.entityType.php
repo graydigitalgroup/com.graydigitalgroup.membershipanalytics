@@ -16,7 +16,8 @@ return [
     'description' => E::ts('Per-membership, per-period state (category/status as of the period) for analytics.'),
     'log' => TRUE,
   ],
-  'getFields' => fn() => [
+  'getFields' => function () {
+    $fields = [
     'id' => [
       'title' => E::ts('ID'),
       'sql_type' => 'int unsigned',
@@ -209,7 +210,15 @@ return [
       'input_type' => 'Text',
       'description' => E::ts('Primary address city as of the period'),
     ],
-  ],
+    ];
+    // Expose any dimension columns added at runtime (is_fellow and anything configured through the
+    // UI dimension manager) so SearchKit and APIv4 can select, group and filter on them too. These
+    // are not in the static list above because they are added by MembershipSnapshot.syncColumns.
+    foreach (CRM_Membershipanalytics_Config::snapshotDimensionFields(array_keys($fields)) as $name => $def) {
+      $fields[$name] = $def;
+    }
+    return $fields;
+  },
   'getIndices' => fn() => [
     'index_period_end' => [
       'fields' => ['period_end' => TRUE],
