@@ -95,13 +95,13 @@ Useful MembershipSnapshot fields:
 
 ### A note on packaged reports
 
-If you ship ready-made SearchKit reports as managed records (as the companion site extension does), CiviCRM may overwrite UI edits to them on cache rebuild. To tweak a packaged report, use SearchKit's **Save a copy** and edit the copy, or change it in code. Reports you build from scratch in the UI are yours and are never overwritten.
+If ready-made SearchKit reports are shipped as managed records (for example by a companion extension), CiviCRM may overwrite UI edits to them on cache rebuild. To tweak a packaged report, use SearchKit's **Save a copy** and edit the copy, or change it in code. Reports you build from scratch in the UI are yours and are never overwritten.
 
 ## Adding a dimension (metadata)
 
 A "dimension" is a contact attribute stamped onto each snapshot row so you can report membership broken down by it. The set of dimensions is **UI-managed** — no code needed to add one.
 
-1. Go to **Administer → Option Groups → Membership Snapshot Dimensions** (option group `membershipanalytics_dimensions`), or the companion site extension's **Memberships → Membership Snapshot Dimensions** admin screen.
+1. Go to **Administer → Option Groups → Membership Snapshot Dimensions** (option group `membershipanalytics_dimensions`). (A companion extension could surface this as a friendlier dedicated admin screen; this extension manages dimensions through the option group.)
 2. Add an **option value**. The **label** is the display name; the **value** is the **field key**, which can be:
    - a **contact field** name — e.g. `job_title`, `gender_id`;
    - a **custom field** as `custom_<id>` — e.g. `custom_90`; or
