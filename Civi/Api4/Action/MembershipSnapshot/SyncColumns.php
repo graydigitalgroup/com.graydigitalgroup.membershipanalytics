@@ -39,7 +39,7 @@ class SyncColumns extends \Civi\Api4\Generic\AbstractAction {
    */
   protected function existingColumns(): array {
     $dao = \CRM_Core_DAO::executeQuery(
-      "SELECT column_name FROM information_schema.columns
+      "SELECT column_name AS column_name FROM information_schema.columns
        WHERE table_schema = DATABASE() AND table_name = %1",
       [1 => [self::TABLE, 'String']]
     );

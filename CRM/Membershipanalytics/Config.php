@@ -301,8 +301,12 @@ class CRM_Membershipanalytics_Config {
   public static function snapshotDimensionFields(array $excludeColumns): array {
     $exclude = array_map('strtolower', $excludeColumns);
     $fields = [];
+    // Alias each column explicitly: on MySQL 8 information_schema result columns come back with
+    // uppercase labels (DATA_TYPE), so unaliased $dao->data_type would be null; an explicit lowercase
+    // alias is returned verbatim on both MySQL 8 and MariaDB/MySQL 5.7.
     $dao = \CRM_Core_DAO::executeQuery(
-      "SELECT column_name, data_type, column_type FROM information_schema.columns
+      "SELECT column_name AS column_name, data_type AS data_type, column_type AS column_type
+       FROM information_schema.columns
        WHERE table_schema = DATABASE() AND table_name = 'civicrm_membership_snapshot'
        ORDER BY ordinal_position"
     );
@@ -323,8 +327,8 @@ class CRM_Membershipanalytics_Config {
   /**
    * APIv4 input type for a MySQL column data type (information_schema data_type).
    */
-  private static function inputTypeForColumnType(string $dataType): string {
-    switch (strtolower($dataType)) {
+  private static function inputTypeForColumnType(?string $dataType): string {
+    switch (strtolower((string) $dataType)) {
       case 'date':
       case 'datetime':
       case 'timestamp':
