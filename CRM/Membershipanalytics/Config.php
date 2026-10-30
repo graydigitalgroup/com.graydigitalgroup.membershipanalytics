@@ -287,19 +287,24 @@ class CRM_Membershipanalytics_Config {
   }
 
   /**
-   * APIv4 field definitions for the snapshot's dynamically added dimension columns.
+   * APIv4 field definitions for a table's dynamically added dimension columns.
    *
-   * The entity's static getFields() lists the fixed columns; this reads the live table and returns
-   * a field definition for every other column (the dimensions added by MembershipSnapshot.syncColumns,
-   * e.g. is_fellow or anything configured in the UI dimension manager), so SearchKit and APIv4 can
-   * select, group and filter on them. Raw SQL on information_schema, not APIv4, because this runs
+   * An entity's static getFields() lists the fixed columns; this reads the live table and returns a
+   * field definition for every other column (the dimensions added at runtime by
+   * MembershipSnapshot.syncColumns or stamped onto the reconciliation fact, e.g. is_fellow or
+   * anything configured in the UI dimension manager), so SearchKit and APIv4 can select, group and
+   * filter on them. For the core dimensions (gender, country, state/province) it returns the proper
+   * pseudoconstant/FK definition so they render as labels rather than raw ids; other columns get a
+   * generic definition from the SQL type. Raw SQL on information_schema, not APIv4, because this runs
    * while entity metadata is being built.
    *
    * @param array $excludeColumns Column names already defined as static fields, to skip.
+   * @param string $table Table to read columns from (defaults to the snapshot).
    * @return array<string, array> name => field definition
    */
-  public static function snapshotDimensionFields(array $excludeColumns): array {
+  public static function snapshotDimensionFields(array $excludeColumns, string $table = 'civicrm_membership_snapshot'): array {
     $exclude = array_map('strtolower', $excludeColumns);
+    $core = self::coreDimensionFieldDefs();
     $fields = [];
     // Alias each column explicitly: on MySQL 8 information_schema result columns come back with
     // uppercase labels (DATA_TYPE), so unaliased $dao->data_type would be null; an explicit lowercase
@@ -307,21 +312,66 @@ class CRM_Membershipanalytics_Config {
     $dao = \CRM_Core_DAO::executeQuery(
       "SELECT column_name AS column_name, data_type AS data_type, column_type AS column_type
        FROM information_schema.columns
-       WHERE table_schema = DATABASE() AND table_name = 'civicrm_membership_snapshot'
-       ORDER BY ordinal_position"
+       WHERE table_schema = DATABASE() AND table_name = %1
+       ORDER BY ordinal_position",
+      [1 => [$table, 'String']]
     );
     while ($dao->fetch()) {
-      if (in_array(strtolower($dao->column_name), $exclude, TRUE)) {
+      $name = $dao->column_name;
+      if (in_array(strtolower($name), $exclude, TRUE)) {
         continue;
       }
-      $fields[$dao->column_name] = [
-        'title' => ucwords(str_replace('_', ' ', $dao->column_name)),
+      if (isset($core[$name])) {
+        $fields[$name] = $core[$name];
+        continue;
+      }
+      $fields[$name] = [
+        'title' => ucwords(str_replace('_', ' ', $name)),
         'sql_type' => $dao->column_type,
         'input_type' => self::inputTypeForColumnType($dao->data_type),
-        'description' => 'Stamped membership-snapshot dimension.',
+        'description' => 'Stamped dimension.',
       ];
     }
     return $fields;
+  }
+
+  /**
+   * Field definitions for the core demographic dimensions, keyed by column name, so the same
+   * labelled fields (gender option group, country/state FK) are presented wherever these columns
+   * are stamped — the snapshot and the reconciliation fact both reuse these.
+   *
+   * @return array<string, array>
+   */
+  public static function coreDimensionFieldDefs(): array {
+    return [
+      'gender_id' => [
+        'title' => ts('Gender'),
+        'sql_type' => 'int unsigned',
+        'input_type' => 'Select',
+        'description' => ts('Contact gender'),
+        'pseudoconstant' => ['option_group_name' => 'gender'],
+      ],
+      'country_id' => [
+        'title' => ts('Country'),
+        'sql_type' => 'int unsigned',
+        'input_type' => 'Select',
+        'description' => ts('Primary address country'),
+        'pseudoconstant' => ['table' => 'civicrm_country', 'key_column' => 'id', 'label_column' => 'name'],
+      ],
+      'state_province_id' => [
+        'title' => ts('State/Province'),
+        'sql_type' => 'int unsigned',
+        'input_type' => 'Select',
+        'description' => ts('Primary address state/province'),
+        'pseudoconstant' => ['table' => 'civicrm_state_province', 'key_column' => 'id', 'label_column' => 'name'],
+      ],
+      'city' => [
+        'title' => ts('City'),
+        'sql_type' => 'varchar(64)',
+        'input_type' => 'Text',
+        'description' => ts('Primary address city'),
+      ],
+    ];
   }
 
   /**

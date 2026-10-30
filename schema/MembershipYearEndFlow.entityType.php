@@ -24,7 +24,8 @@ return [
     'description' => E::ts('Per-membership fiscal year-end reconciliation flows (entered/exited/transferred), computed once per refresh.'),
     'log' => TRUE,
   ],
-  'getFields' => fn() => [
+  'getFields' => function () {
+    $fields = [
     'id' => [
       'title' => E::ts('ID'),
       'sql_type' => 'int unsigned',
@@ -89,7 +90,17 @@ return [
         'callback' => 'CRM_Membershipanalytics_Config::reconBasisOptions',
       ],
     ],
-  ],
+    ];
+    // Expose the dimension columns stamped onto the fact by MembershipYearEndFlow.Rebuild (copied
+    // from the snapshot's stamped dimensions), so a report can slice these flows by gender, geography
+    // or any dimension configured in the UI manager — the same columns, with the same labels, the
+    // snapshot exposes. Only columns actually present on the table are listed, so getFields is safe
+    // before the first refresh has added them.
+    foreach (CRM_Membershipanalytics_Config::snapshotDimensionFields(array_keys($fields), 'civicrm_membership_year_end_flow') as $name => $def) {
+      $fields[$name] = $def;
+    }
+    return $fields;
+  },
   'getIndices' => fn() => [
     'index_basis_fy_type' => [
       'fields' => ['basis' => TRUE, 'fiscal_year' => TRUE, 'membership_type_id' => TRUE],

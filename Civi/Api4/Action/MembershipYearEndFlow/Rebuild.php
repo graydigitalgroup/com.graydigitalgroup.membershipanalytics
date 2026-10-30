@@ -117,10 +117,87 @@ class Rebuild extends \Civi\Api4\Generic\AbstractAction {
       );
     }
 
+    $dimensions = $this->stampDimensions();
+
     $result[] = [
       'net' => (int) \CRM_Core_DAO::singleValueQuery("SELECT COUNT(*) FROM civicrm_membership_year_end_flow WHERE basis = 'net'"),
       'gross' => (int) \CRM_Core_DAO::singleValueQuery("SELECT COUNT(*) FROM civicrm_membership_year_end_flow WHERE basis = 'gross'"),
+      'dimensions' => $dimensions,
     ];
+  }
+
+  /**
+   * Stamp the active demographic dimensions onto the fact so a report can reconcile by any of them
+   * (gender, geography, or a dimension added in the UI manager) with a plain GROUP BY.
+   *
+   * The values are copied straight from the snapshot's already-stamped dimension columns, keyed by
+   * membership, rather than re-resolved from the contact. That guarantees a flow row carries exactly
+   * the value the snapshot carries for the same membership, so a reconciliation sliced by a dimension
+   * ties back to the snapshot sliced the same way. The snapshot stamps each dimension as the
+   * contact's current value (identical across the membership's periods), so MAX() per membership is
+   * that value and is robust to a period left unstamped by an incremental run.
+   *
+   * Columns are added to the fact on demand (like MembershipSnapshot.syncColumns does on the
+   * snapshot), so no separate schema migration is needed when a dimension is configured.
+   *
+   * @return array<string> Dimension columns stamped this run.
+   */
+  private function stampDimensions(): array {
+    $snapshotColumns = $this->tableColumns('civicrm_membership_snapshot');
+    $factColumns = $this->tableColumns('civicrm_membership_year_end_flow');
+
+    // Only dimensions that are active AND actually stamped on the snapshot can be copied.
+    $columns = [];
+    foreach (Config::activeDimensions() as $spec) {
+      $col = $spec['column'];
+      if (isset($snapshotColumns[strtolower($col)])) {
+        $columns[$col] = $spec['sql_type'] ?: 'varchar(64)';
+      }
+    }
+    if (!$columns) {
+      return [];
+    }
+
+    foreach ($columns as $col => $type) {
+      if (!isset($factColumns[strtolower($col)])) {
+        \CRM_Core_DAO::executeQuery("ALTER TABLE civicrm_membership_year_end_flow ADD COLUMN `$col` $type NULL");
+      }
+    }
+
+    $picks = [];
+    $sets = [];
+    foreach (array_keys($columns) as $col) {
+      $picks[] = "MAX(s.`$col`) AS `$col`";
+      $sets[] = "f.`$col` = d.`$col`";
+    }
+    \CRM_Core_DAO::executeQuery(
+      'UPDATE civicrm_membership_year_end_flow f
+       JOIN (
+         SELECT s.membership_id, ' . implode(', ', $picks) . '
+         FROM civicrm_membership_snapshot s
+         WHERE s.membership_id IS NOT NULL
+         GROUP BY s.membership_id
+       ) d ON d.membership_id = f.membership_id
+       SET ' . implode(', ', $sets)
+    );
+
+    return array_keys($columns);
+  }
+
+  /**
+   * Column names on a table, keyed lower-case for case-insensitive lookup.
+   */
+  private function tableColumns(string $table): array {
+    $dao = \CRM_Core_DAO::executeQuery(
+      "SELECT column_name AS column_name FROM information_schema.columns
+       WHERE table_schema = DATABASE() AND table_name = %1",
+      [1 => [$table, 'String']]
+    );
+    $columns = [];
+    while ($dao->fetch()) {
+      $columns[strtolower($dao->column_name)] = TRUE;
+    }
+    return $columns;
   }
 
 }
