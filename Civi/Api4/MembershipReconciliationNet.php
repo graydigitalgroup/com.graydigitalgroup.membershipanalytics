@@ -70,7 +70,10 @@ class MembershipReconciliationNet extends Generic\SqlView {
 
   protected static function viewSelect(): array {
     return [
-      ['select' => 'ROW_NUMBER() OVER (ORDER BY recon.fiscal_year, recon.membership_type_id)', 'name' => 'id', 'data_type' => 'Integer'],
+      // Deterministic surrogate id (fiscal_year × category is the grain). A plain expression, not a
+      // window, so the outer filter can push down into the view on MySQL 8 instead of materializing
+      // the whole view for every page query.
+      ['select' => '(recon.fiscal_year * 1000 + recon.membership_type_id)', 'name' => 'id', 'data_type' => 'Integer'],
       ['select' => 'recon.fiscal_year', 'name' => 'fiscal_year', 'original_field' => 'MembershipSnapshot.fiscal_year'],
       ['select' => 'recon.year_end_date', 'name' => 'fiscal_year_end', 'data_type' => 'Date', 'title' => ts('Fiscal Year End')],
       ['select' => 'recon.membership_type_id', 'name' => 'membership_type_id', 'original_field' => 'MembershipSnapshot.membership_type_id'],
