@@ -63,6 +63,10 @@ class Refresh extends \Civi\Api4\Generic\AbstractAction {
 
     $out['snapshots'] = $calc->execute()->first();
 
+    // Rebuild the materialized reconciliation fact from the now-current snapshot, so reconciliation
+    // reports read a small pre-computed table instead of windowing the whole snapshot per page view.
+    $out['year_end_flow'] = \Civi\Api4\MembershipYearEndFlow::rebuild(FALSE)->execute()->first();
+
     $result[] = $out;
   }
 
