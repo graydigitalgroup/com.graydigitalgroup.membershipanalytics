@@ -350,6 +350,32 @@ class CRM_Membershipanalytics_Config {
   }
 
   /**
+   * Pseudoconstant options for MembershipYearEndFlow.flow.
+   */
+  public static function reconFlowOptions(): array {
+    return [
+      'entered' => ts('Entered'),
+      'exited' => ts('Exited'),
+      'transfer_in' => ts('Transferred In'),
+      'transfer_out' => ts('Transferred Out'),
+    ];
+  }
+
+  /**
+   * Pseudoconstant options for MembershipYearEndFlow.reason.
+   */
+  public static function reconReasonOptions(): array {
+    return [
+      'new' => ts('New'),
+      'reactivated' => ts('Reactivated'),
+      'reinstated' => ts('Reinstated'),
+      'dropped' => ts('Dropped'),
+      'archived' => ts('Archived'),
+      'other' => ts('Other'),
+    ];
+  }
+
+  /**
    * Movement reason for a membership's prior status (on entry) and next status (on exit).
    *
    * entry: the status a membership held BEFORE it crossed into counting → 'new' | 'reactivated'

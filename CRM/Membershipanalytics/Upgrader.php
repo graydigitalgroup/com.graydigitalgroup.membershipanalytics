@@ -181,6 +181,29 @@ final class CRM_Membershipanalytics_Upgrader extends \CRM_Extension_Upgrader_Bas
    * @return TRUE on success
    * @throws CRM_Core_Exception
    */
+  /**
+   * Add the materialized reconciliation fact table (MembershipYearEndFlow). It is populated by
+   * MembershipYearEndFlow.Rebuild as part of the refresh pipeline, so the table is created empty here.
+   */
+  public function upgrade_1300(): bool {
+    $this->ctx->log->info('Applying update 1300 - add civicrm_membership_year_end_flow');
+    if (!CRM_Core_DAO::singleValueQuery("SHOW TABLES LIKE 'civicrm_membership_year_end_flow'")) {
+      CRM_Core_DAO::executeQuery("CREATE TABLE civicrm_membership_year_end_flow (
+        id int unsigned NOT NULL AUTO_INCREMENT,
+        fiscal_year int NULL COMMENT 'Fiscal year the flow is attributed to',
+        membership_id int unsigned NULL COMMENT 'FK to Membership',
+        membership_type_id int unsigned NULL COMMENT 'Category the flow applies to',
+        flow varchar(16) NULL COMMENT 'entered | exited | transfer_in | transfer_out',
+        reason varchar(16) NULL COMMENT 'Entry/exit reason; null for transfers',
+        PRIMARY KEY (id),
+        INDEX index_fiscal_year_type (fiscal_year, membership_type_id),
+        INDEX index_membership (membership_id),
+        INDEX index_flow (flow)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+    }
+    return TRUE;
+  }
+
   // public function upgrade_4203(): bool {
   //   $this->ctx->log->info('Planning update 4203'); // PEAR Log interface
 
