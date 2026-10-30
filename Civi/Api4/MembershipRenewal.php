@@ -41,6 +41,8 @@ class MembershipRenewal extends Generic\SqlView {
 
   /**
    * Rebuild the view atomically on cache rebuild (single CREATE OR REPLACE, mirrors the siblings).
+   * The per-year-end aggregates are chained CTEs (see aggCte) so MySQL 8 materializes each once
+   * instead of re-aggregating the snapshot for every reference of the self-joined counted_ye.
    *
    * @internal
    */
@@ -52,7 +54,8 @@ class MembershipRenewal extends Generic\SqlView {
     }
     $select = implode(', ', $selects);
     $from = static::viewFrom();
-    \CRM_Core_DAO::executeQuery("CREATE OR REPLACE VIEW `$viewName` AS SELECT $select $from");
+    $cte = static::aggCte();
+    \CRM_Core_DAO::executeQuery("CREATE OR REPLACE VIEW `$viewName` AS WITH $cte SELECT $select $from");
   }
 
   protected static function viewSelect(): array {
@@ -69,44 +72,58 @@ class MembershipRenewal extends Generic\SqlView {
   }
 
   protected static function viewFrom(): string {
-    // Counted members at each fiscal year-end = the last snapshot in each fiscal_year.
-    $yearEnd = "(SELECT s.fiscal_year, s.membership_type_id, SUM(s.counts_as_member) AS counted,
-                        MAX(s.period_end) AS year_end_date
-                 FROM civicrm_membership_snapshot s
-                 JOIN (SELECT fiscal_year, MAX(period_end) AS pe
-                       FROM civicrm_membership_snapshot GROUP BY fiscal_year) last_period
-                   ON last_period.fiscal_year = s.fiscal_year AND last_period.pe = s.period_end
-                 GROUP BY s.fiscal_year, s.membership_type_id)";
-
-    // One counted row per membership per fiscal year-end, with its term end_date.
-    $countedYe = "(SELECT s.fiscal_year, s.membership_id, s.membership_type_id, s.end_date
-                   FROM civicrm_membership_snapshot s
-                   JOIN (SELECT fiscal_year, MAX(period_end) AS pe
-                         FROM civicrm_membership_snapshot GROUP BY fiscal_year) last_period
-                     ON last_period.fiscal_year = s.fiscal_year AND last_period.pe = s.period_end
-                   WHERE s.counts_as_member = 1 AND s.membership_id IS NOT NULL)";
-
-    // Members present at both this and the prior year-end in the same category, split by whether
-    // the term end_date advanced (renewed) or not (continued).
-    $pairs = "(SELECT cur.fiscal_year, cur.membership_type_id,
-                      COALESCE(SUM(cur.end_date > prev.end_date), 0) AS renewed,
-                      COUNT(*) - COALESCE(SUM(cur.end_date > prev.end_date), 0) AS continued
-               FROM $countedYe cur
-               JOIN $countedYe prev
-                 ON prev.membership_id = cur.membership_id
-                AND prev.membership_type_id = cur.membership_type_id
-                AND prev.fiscal_year = cur.fiscal_year - 1
-               GROUP BY cur.fiscal_year, cur.membership_type_id)";
-
     return "FROM (
       SELECT ye.fiscal_year, ye.membership_type_id, ye.year_end_date,
              ye.counted AS total_counted,
              COALESCE(p.renewed, 0) AS renewed,
              COALESCE(p.continued, 0) AS continued
-      FROM $yearEnd ye
-      LEFT JOIN $pairs p
+      FROM year_end ye
+      LEFT JOIN pairs p
         ON p.fiscal_year = ye.fiscal_year AND p.membership_type_id = ye.membership_type_id
     ) mix";
+  }
+
+  /**
+   * The per-year-end aggregates, defined once as chained CTEs so MySQL 8 materializes each a single
+   * time. The prior-year comparison self-joins counted_ye (cur vs prev); inlining it as plain derived
+   * tables made MySQL 8 re-aggregate the whole snapshot for every reference — tens of seconds. MariaDB
+   * optimizes either form.
+   *
+   * - last_period: the latest snapshot date in each fiscal year (the year-end instant).
+   * - counted_ye: one counted row per membership at its fiscal year-end, with its term end_date.
+   * - year_end: counted members per category at each fiscal year-end.
+   * - pairs: members counted at both this and the prior year-end in the same category, split into
+   *   renewed (term end_date advanced) vs continued (unchanged).
+   */
+  private static function aggCte(): string {
+    return "last_period AS (
+        SELECT fiscal_year, MAX(period_end) AS pe
+        FROM civicrm_membership_snapshot GROUP BY fiscal_year
+      ),
+      counted_ye AS (
+        SELECT s.fiscal_year, s.membership_id, s.membership_type_id, s.end_date
+        FROM civicrm_membership_snapshot s
+        JOIN last_period ON last_period.fiscal_year = s.fiscal_year AND last_period.pe = s.period_end
+        WHERE s.counts_as_member = 1 AND s.membership_id IS NOT NULL
+      ),
+      year_end AS (
+        SELECT s.fiscal_year, s.membership_type_id, SUM(s.counts_as_member) AS counted,
+               MAX(s.period_end) AS year_end_date
+        FROM civicrm_membership_snapshot s
+        JOIN last_period ON last_period.fiscal_year = s.fiscal_year AND last_period.pe = s.period_end
+        GROUP BY s.fiscal_year, s.membership_type_id
+      ),
+      pairs AS (
+        SELECT cur.fiscal_year, cur.membership_type_id,
+               COALESCE(SUM(cur.end_date > prev.end_date), 0) AS renewed,
+               COUNT(*) - COALESCE(SUM(cur.end_date > prev.end_date), 0) AS continued
+        FROM counted_ye cur
+        JOIN counted_ye prev
+          ON prev.membership_id = cur.membership_id
+         AND prev.membership_type_id = cur.membership_type_id
+         AND prev.fiscal_year = cur.fiscal_year - 1
+        GROUP BY cur.fiscal_year, cur.membership_type_id
+      )";
   }
 
 }
