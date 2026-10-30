@@ -47,6 +47,9 @@ class MembershipReconciliationNet extends Generic\SqlView {
 
   /**
    * Rebuild the view atomically on cache rebuild (single CREATE OR REPLACE, mirrors the siblings).
+   * The per-year-end state is a boundary CTE walked with LAG/LEAD windows (see aggCte) rather than
+   * self-joining the ~tens-of-thousands-of-rows per-membership year-end set, which MySQL 8 runs as a
+   * huge nested loop for ~50s. MariaDB keys it either way.
    *
    * @internal
    */
@@ -58,7 +61,8 @@ class MembershipReconciliationNet extends Generic\SqlView {
     }
     $select = implode(', ', $selects);
     $from = static::viewFrom();
-    \CRM_Core_DAO::executeQuery("CREATE OR REPLACE VIEW `$viewName` AS SELECT $select $from");
+    $cte = static::aggCte();
+    \CRM_Core_DAO::executeQuery("CREATE OR REPLACE VIEW `$viewName` AS WITH $cte SELECT $select $from");
   }
 
   protected static function viewSelect(): array {
@@ -87,96 +91,6 @@ class MembershipReconciliationNet extends Generic\SqlView {
   }
 
   protected static function viewFrom(): string {
-    // Counted members at each fiscal year-end = the last snapshot in each fiscal_year.
-    $yearEnd = "(SELECT s.fiscal_year, s.membership_type_id, SUM(s.counts_as_member) AS counted,
-                        MAX(s.period_end) AS year_end_date
-                 FROM civicrm_membership_snapshot s
-                 JOIN (SELECT fiscal_year, MAX(period_end) AS pe
-                       FROM civicrm_membership_snapshot GROUP BY fiscal_year) last_period
-                   ON last_period.fiscal_year = s.fiscal_year AND last_period.pe = s.period_end
-                 GROUP BY s.fiscal_year, s.membership_type_id)";
-
-    // One counted row per membership per fiscal year-end (the boundary state to compare).
-    $countedYe = "(SELECT s.fiscal_year, s.membership_id, s.membership_type_id
-                   FROM civicrm_membership_snapshot s
-                   JOIN (SELECT fiscal_year, MAX(period_end) AS pe
-                         FROM civicrm_membership_snapshot GROUP BY fiscal_year) last_period
-                     ON last_period.fiscal_year = s.fiscal_year AND last_period.pe = s.period_end
-                   WHERE s.counts_as_member = 1 AND s.membership_id IS NOT NULL)";
-
-    // Every membership's status at each year-end (counted or not), so an entry can be classified by
-    // where it came from and an exit by where it went.
-    $allYe = "(SELECT s.fiscal_year, s.membership_id, s.status_id
-               FROM civicrm_membership_snapshot s
-               JOIN (SELECT fiscal_year, MAX(period_end) AS pe
-                     FROM civicrm_membership_snapshot GROUP BY fiscal_year) last_period
-                 ON last_period.fiscal_year = s.fiscal_year AND last_period.pe = s.period_end
-               WHERE s.membership_id IS NOT NULL)";
-
-    // Config-driven reason mapping (shared with the gross view).
-    $entryReasons = \CRM_Membershipanalytics_Config::entryReasonStatusIds();
-    $exitReasons = \CRM_Membershipanalytics_Config::exitReasonStatusIds();
-    $reactivatedIds = self::idList($entryReasons['reactivated']);
-    $reinstatedIds = self::idList($entryReasons['reinstated']);
-    $droppedIds = self::idList($exitReasons['dropped']);
-    $archivedIds = self::idList($exitReasons['archived']);
-
-    // Net flows: compare each membership's counted state across consecutive year-ends. Entries carry
-    // a reason from the prior year-end status, exits a reason from this year-end status.
-    $flows = "(SELECT fiscal_year, membership_type_id,
-                      SUM(kind = 'entry') AS entered,
-                      SUM(kind = 'entry' AND reason = 'reactivated') AS entered_reactivated,
-                      SUM(kind = 'entry' AND reason = 'reinstated') AS entered_reinstated,
-                      SUM(kind = 'entry' AND reason = 'new') AS entered_new,
-                      SUM(kind = 'exit')  AS exited,
-                      SUM(kind = 'exit' AND reason = 'dropped') AS exited_dropped,
-                      SUM(kind = 'exit' AND reason = 'archived') AS exited_archived,
-                      SUM(kind = 'exit' AND reason = 'other') AS exited_other,
-                      SUM(kind = 'tin')   AS transfer_in,
-                      SUM(kind = 'tout')  AS transfer_out
-               FROM (
-                 -- Entered: counted this year-end, not counted at the prior year-end; reason from the
-                 -- status it held at the prior year-end (none/pending/lapsed → new).
-                 SELECT cur.fiscal_year, cur.membership_type_id, 'entry' AS kind,
-                        CASE WHEN prevAll.status_id IN ($reactivatedIds) THEN 'reactivated'
-                             WHEN prevAll.status_id IN ($reinstatedIds) THEN 'reinstated'
-                             ELSE 'new' END AS reason
-                 FROM $countedYe cur
-                 LEFT JOIN $countedYe prev
-                   ON prev.membership_id = cur.membership_id AND prev.fiscal_year = cur.fiscal_year - 1
-                 LEFT JOIN $allYe prevAll
-                   ON prevAll.membership_id = cur.membership_id AND prevAll.fiscal_year = cur.fiscal_year - 1
-                 WHERE prev.membership_id IS NULL
-                 UNION ALL
-                 -- Exited: counted at the prior year-end, not counted this year-end (attributed to this
-                 -- year); reason from the status it moved into this year-end (gone/other → other).
-                 SELECT prev.fiscal_year + 1, prev.membership_type_id, 'exit',
-                        CASE WHEN curAll.status_id IN ($droppedIds) THEN 'dropped'
-                             WHEN curAll.status_id IN ($archivedIds) THEN 'archived'
-                             ELSE 'other' END
-                 FROM $countedYe prev
-                 LEFT JOIN $countedYe cur
-                   ON cur.membership_id = prev.membership_id AND cur.fiscal_year = prev.fiscal_year + 1
-                 LEFT JOIN $allYe curAll
-                   ON curAll.membership_id = prev.membership_id AND curAll.fiscal_year = prev.fiscal_year + 1
-                 WHERE cur.membership_id IS NULL
-                 UNION ALL
-                 -- Transfer out: counted both year-ends, type changed — out of the prior type.
-                 SELECT cur.fiscal_year, prev.membership_type_id, 'tout', NULL
-                 FROM $countedYe cur
-                 JOIN $countedYe prev
-                   ON prev.membership_id = cur.membership_id AND prev.fiscal_year = cur.fiscal_year - 1
-                 WHERE cur.membership_type_id <> prev.membership_type_id
-                 UNION ALL
-                 -- Transfer in: counted both year-ends, type changed — into the new type.
-                 SELECT cur.fiscal_year, cur.membership_type_id, 'tin', NULL
-                 FROM $countedYe cur
-                 JOIN $countedYe prev
-                   ON prev.membership_id = cur.membership_id AND prev.fiscal_year = cur.fiscal_year - 1
-                 WHERE cur.membership_type_id <> prev.membership_type_id
-               ) exploded
-               GROUP BY fiscal_year, membership_type_id)";
-
     return "FROM (
       SELECT ye.fiscal_year, ye.membership_type_id,
              ye.year_end_date,
@@ -192,14 +106,117 @@ class MembershipReconciliationNet extends Generic\SqlView {
              COALESCE(fl.exited_dropped, 0) AS exited_dropped,
              COALESCE(fl.exited_archived, 0) AS exited_archived,
              COALESCE(fl.exited_other, 0) AS exited_other
-      FROM $yearEnd ye
-      LEFT JOIN $yearEnd op
+      FROM year_end ye
+      LEFT JOIN year_end op
         ON op.membership_type_id = ye.membership_type_id
        AND op.fiscal_year = ye.fiscal_year - 1
-      LEFT JOIN $flows fl
+      LEFT JOIN flows_agg fl
         ON fl.fiscal_year = ye.fiscal_year
        AND fl.membership_type_id = ye.membership_type_id
     ) recon";
+  }
+
+  /**
+   * Chained CTEs, each materialized once by MySQL 8.
+   *
+   * - last_period: the latest snapshot date in each fiscal year (the year-end instant).
+   * - year_end: counted members per category at each fiscal year-end (used for current + opening).
+   * - boundary: one row per membership per fiscal year-end it is present at, with its status and —
+   *   when counted — its category.
+   * - win: boundary walked with LAG (prior year-end) and LEAD (next year-end), so each membership's
+   *   counted state and category can be compared across consecutive year-ends without a self-join.
+   * - flows: one row per net flow, derived from win (entered / exited / transfer in / transfer out),
+   *   carrying a reason from the prior year-end status (entries) or next year-end status (exits).
+   * - flows_agg: the flows summed per fiscal_year × category.
+   *
+   * NULL-safe comparisons (COALESCE on the LAG/LEAD columns) treat "absent at the adjacent year-end"
+   * as not-counted, so a first appearance is an entry and a disappearance is an exit.
+   */
+  private static function aggCte(): string {
+    $entryReasons = \CRM_Membershipanalytics_Config::entryReasonStatusIds();
+    $exitReasons = \CRM_Membershipanalytics_Config::exitReasonStatusIds();
+    $reactivatedIds = self::idList($entryReasons['reactivated']);
+    $reinstatedIds = self::idList($entryReasons['reinstated']);
+    $droppedIds = self::idList($exitReasons['dropped']);
+    $archivedIds = self::idList($exitReasons['archived']);
+
+    return "last_period AS (
+        SELECT fiscal_year, MAX(period_end) AS pe
+        FROM civicrm_membership_snapshot GROUP BY fiscal_year
+      ),
+      year_end AS (
+        SELECT s.fiscal_year, s.membership_type_id, SUM(s.counts_as_member) AS counted,
+               MAX(s.period_end) AS year_end_date
+        FROM civicrm_membership_snapshot s
+        JOIN last_period ON last_period.fiscal_year = s.fiscal_year AND last_period.pe = s.period_end
+        GROUP BY s.fiscal_year, s.membership_type_id
+      ),
+      boundary AS (
+        SELECT s.fiscal_year, s.membership_id, s.status_id,
+               s.counts_as_member AS counted,
+               CASE WHEN s.counts_as_member = 1 THEN s.membership_type_id END AS counted_type
+        FROM civicrm_membership_snapshot s
+        JOIN last_period ON last_period.fiscal_year = s.fiscal_year AND last_period.pe = s.period_end
+        WHERE s.membership_id IS NOT NULL
+      ),
+      win AS (
+        SELECT fiscal_year, membership_id, counted, counted_type,
+               LAG(fiscal_year)  OVER w AS prev_fy,
+               LAG(counted)      OVER w AS prev_counted,
+               LAG(counted_type) OVER w AS prev_type,
+               LAG(status_id)    OVER w AS prev_status,
+               LEAD(fiscal_year) OVER w AS next_fy,
+               LEAD(counted)     OVER w AS next_counted,
+               LEAD(status_id)   OVER w AS next_status
+        FROM boundary
+        WINDOW w AS (PARTITION BY membership_id ORDER BY fiscal_year)
+      ),
+      flows AS (
+        -- Entered: counted this year-end, not counted at the prior year-end; reason from the status
+        -- held at the prior year-end (absent prior year, or any other status, is New).
+        SELECT fiscal_year, counted_type AS membership_type_id, 'entry' AS kind,
+               CASE WHEN prev_fy = fiscal_year - 1 AND prev_status IN ($reactivatedIds) THEN 'reactivated'
+                    WHEN prev_fy = fiscal_year - 1 AND prev_status IN ($reinstatedIds) THEN 'reinstated'
+                    ELSE 'new' END AS reason
+        FROM win
+        WHERE counted = 1
+          AND NOT (COALESCE(prev_fy, -1) = fiscal_year - 1 AND COALESCE(prev_counted, 0) = 1)
+        UNION ALL
+        -- Exited: counted this year-end, not counted next year-end; attributed to next year, from this
+        -- year's category; reason from the status it moved into next year-end (absent/other is Other).
+        SELECT fiscal_year + 1, counted_type, 'exit',
+               CASE WHEN next_fy = fiscal_year + 1 AND next_status IN ($droppedIds) THEN 'dropped'
+                    WHEN next_fy = fiscal_year + 1 AND next_status IN ($archivedIds) THEN 'archived'
+                    ELSE 'other' END
+        FROM win
+        WHERE counted = 1
+          AND NOT (COALESCE(next_fy, -1) = fiscal_year + 1 AND COALESCE(next_counted, 0) = 1)
+        UNION ALL
+        -- Transfer out: counted both year-ends, category changed — out of the prior category.
+        SELECT fiscal_year, prev_type, 'tout', NULL
+        FROM win
+        WHERE counted = 1 AND prev_fy = fiscal_year - 1 AND prev_counted = 1 AND prev_type <> counted_type
+        UNION ALL
+        -- Transfer in: counted both year-ends, category changed — into this year's category.
+        SELECT fiscal_year, counted_type, 'tin', NULL
+        FROM win
+        WHERE counted = 1 AND prev_fy = fiscal_year - 1 AND prev_counted = 1 AND prev_type <> counted_type
+      ),
+      flows_agg AS (
+        SELECT fiscal_year, membership_type_id,
+               SUM(kind = 'entry') AS entered,
+               SUM(kind = 'entry' AND reason = 'reactivated') AS entered_reactivated,
+               SUM(kind = 'entry' AND reason = 'reinstated') AS entered_reinstated,
+               SUM(kind = 'entry' AND reason = 'new') AS entered_new,
+               SUM(kind = 'exit')  AS exited,
+               SUM(kind = 'exit' AND reason = 'dropped') AS exited_dropped,
+               SUM(kind = 'exit' AND reason = 'archived') AS exited_archived,
+               SUM(kind = 'exit' AND reason = 'other') AS exited_other,
+               SUM(kind = 'tin')   AS transfer_in,
+               SUM(kind = 'tout')  AS transfer_out
+        FROM flows
+        GROUP BY fiscal_year, membership_type_id
+      )";
   }
 
   /**
