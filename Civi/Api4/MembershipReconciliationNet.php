@@ -50,7 +50,11 @@ class MembershipReconciliationNet extends Generic\SqlView {
    * @internal
    */
   public static function _on_civi_api4_entityTypes(\Civi\Core\Event\GenericHookEvent $event): void {
-    if (!\CRM_Core_DAO::singleValueQuery("SHOW TABLES LIKE 'civicrm_membership_year_end_flow'")) {
+    // The view filters on basis, so require the fact table AND that column before rebuilding; a flush
+    // that runs before the schema upgrade otherwise fails on an unknown column. Short-circuits so
+    // SHOW COLUMNS is not run against a missing table.
+    if (!\CRM_Core_DAO::singleValueQuery("SHOW TABLES LIKE 'civicrm_membership_year_end_flow'")
+        || !\CRM_Core_DAO::singleValueQuery("SHOW COLUMNS FROM civicrm_membership_year_end_flow LIKE 'basis'")) {
       return;
     }
     $viewName = static::viewName();

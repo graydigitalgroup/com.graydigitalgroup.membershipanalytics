@@ -182,43 +182,32 @@ final class CRM_Membershipanalytics_Upgrader extends \CRM_Extension_Upgrader_Bas
    * @throws CRM_Core_Exception
    */
   /**
-   * Add the materialized reconciliation fact table (MembershipYearEndFlow). It is populated by
-   * MembershipYearEndFlow.Rebuild as part of the refresh pipeline, so the table is created empty here.
+   * Add the materialized reconciliation fact table (MembershipYearEndFlow) from its schema
+   * definition. Populated by MembershipYearEndFlow.Rebuild in the refresh pipeline.
    */
   public function upgrade_1300(): bool {
     $this->ctx->log->info('Applying update 1300 - add civicrm_membership_year_end_flow');
-    if (!CRM_Core_DAO::singleValueQuery("SHOW TABLES LIKE 'civicrm_membership_year_end_flow'")) {
-      CRM_Core_DAO::executeQuery("CREATE TABLE civicrm_membership_year_end_flow (
-        id int unsigned NOT NULL AUTO_INCREMENT,
-        fiscal_year int NULL COMMENT 'Fiscal year the flow is attributed to',
-        membership_id int unsigned NULL COMMENT 'FK to Membership',
-        membership_type_id int unsigned NULL COMMENT 'Category the flow applies to',
-        flow varchar(16) NULL COMMENT 'entered | exited | transfer_in | transfer_out',
-        reason varchar(16) NULL COMMENT 'Entry/exit reason; null for transfers',
-        basis varchar(8) NULL COMMENT 'net | gross',
-        PRIMARY KEY (id),
-        INDEX index_basis_fy_type (basis, fiscal_year, membership_type_id),
-        INDEX index_membership (membership_id),
-        INDEX index_flow (flow)
-      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+    if (!E::schema()->tableExists('civicrm_membership_year_end_flow')) {
+      E::schema()->createEntityTable('schema/MembershipYearEndFlow.entityType.php');
     }
     return TRUE;
   }
 
   /**
-   * Add the basis column (net | gross) to an already-created fact table, so one fact serves both
-   * reconciliation bases. No-op on a fresh install where upgrade_1300 already created it.
+   * Add the basis column (net | gross) + its index to an already-created fact table, so one fact
+   * serves both reconciliation bases. alterSchemaField/createIndex are no-ops where the current
+   * schema is already in place (e.g. a fresh install built by upgrade_1300).
    */
   public function upgrade_1301(): bool {
     $this->ctx->log->info('Applying update 1301 - add basis to civicrm_membership_year_end_flow');
-    $hasCol = CRM_Core_DAO::executeQuery("SHOW COLUMNS FROM civicrm_membership_year_end_flow LIKE 'basis'");
-    if (!$hasCol->fetch()) {
-      CRM_Core_DAO::executeQuery("ALTER TABLE civicrm_membership_year_end_flow ADD COLUMN basis varchar(8) NULL COMMENT 'net | gross' AFTER reason");
-    }
-    $hasIdx = CRM_Core_DAO::executeQuery("SHOW INDEX FROM civicrm_membership_year_end_flow WHERE Key_name = 'index_basis_fy_type'");
-    if (!$hasIdx->fetch()) {
-      CRM_Core_DAO::executeQuery("ALTER TABLE civicrm_membership_year_end_flow ADD INDEX index_basis_fy_type (basis, fiscal_year, membership_type_id)");
-    }
+    E::schema()->alterSchemaField('MembershipYearEndFlow', 'basis', [
+      'sql_type' => 'varchar(8)',
+      'description' => 'net | gross',
+    ], 'AFTER `reason`');
+    E::schema()->createIndex('civicrm_membership_year_end_flow', 'index_basis_fy_type', [
+      'fields' => ['basis' => TRUE, 'fiscal_year' => TRUE, 'membership_type_id' => TRUE],
+      'unique' => FALSE,
+    ]);
     return TRUE;
   }
 
