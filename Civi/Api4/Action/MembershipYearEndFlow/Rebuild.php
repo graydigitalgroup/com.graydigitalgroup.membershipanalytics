@@ -102,6 +102,21 @@ class Rebuild extends \Civi\Api4\Generic\AbstractAction {
       "INSERT INTO civicrm_membership_year_end_flow (fiscal_year, membership_id, membership_type_id, flow, reason, basis)
        $net UNION ALL $gross"
     );
+
+    // Materialize the counted population per fiscal year-end (reconciliation opening/current), so the
+    // views read these few rows instead of re-scanning the whole snapshot on every page query.
+    if (\CRM_Core_DAO::singleValueQuery("SHOW TABLES LIKE 'civicrm_membership_year_end_count'")) {
+      \CRM_Core_DAO::executeQuery('TRUNCATE TABLE civicrm_membership_year_end_count');
+      \CRM_Core_DAO::executeQuery(
+        "INSERT INTO civicrm_membership_year_end_count (fiscal_year, membership_type_id, counted, year_end_date)
+         SELECT s.fiscal_year, s.membership_type_id, SUM(s.counts_as_member), MAX(s.period_end)
+         FROM civicrm_membership_snapshot s
+         JOIN (SELECT fiscal_year, MAX(period_end) AS pe FROM civicrm_membership_snapshot GROUP BY fiscal_year) lp
+           ON lp.fiscal_year = s.fiscal_year AND lp.pe = s.period_end
+         GROUP BY s.fiscal_year, s.membership_type_id"
+      );
+    }
+
     $result[] = [
       'net' => (int) \CRM_Core_DAO::singleValueQuery("SELECT COUNT(*) FROM civicrm_membership_year_end_flow WHERE basis = 'net'"),
       'gross' => (int) \CRM_Core_DAO::singleValueQuery("SELECT COUNT(*) FROM civicrm_membership_year_end_flow WHERE basis = 'gross'"),

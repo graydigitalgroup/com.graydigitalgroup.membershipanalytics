@@ -50,7 +50,8 @@ class MembershipReconciliation extends Generic\SqlView {
     // The view filters on basis, so require the fact table AND that column before rebuilding; a flush
     // that runs before the schema upgrade otherwise fails on an unknown column. Short-circuits so
     // SHOW COLUMNS is not run against a missing table.
-    if (!\CRM_Core_DAO::singleValueQuery("SHOW TABLES LIKE 'civicrm_membership_year_end_flow'")
+    if (!\CRM_Core_DAO::singleValueQuery("SHOW TABLES LIKE 'civicrm_membership_year_end_count'")
+        || !\CRM_Core_DAO::singleValueQuery("SHOW TABLES LIKE 'civicrm_membership_year_end_flow'")
         || !\CRM_Core_DAO::singleValueQuery("SHOW COLUMNS FROM civicrm_membership_year_end_flow LIKE 'basis'")) {
       return;
     }
@@ -125,15 +126,9 @@ class MembershipReconciliation extends Generic\SqlView {
    * aggregated from the materialized per-membership fact (for entered/exited/transfers + reasons).
    */
   private static function aggCte(): string {
-    return "last_period AS (
-        SELECT fiscal_year, MAX(period_end) AS pe FROM civicrm_membership_snapshot GROUP BY fiscal_year
-      ),
-      year_end AS (
-        SELECT s.fiscal_year, s.membership_type_id, SUM(s.counts_as_member) AS counted,
-               MAX(s.period_end) AS year_end_date
-        FROM civicrm_membership_snapshot s
-        JOIN last_period ON last_period.fiscal_year = s.fiscal_year AND last_period.pe = s.period_end
-        GROUP BY s.fiscal_year, s.membership_type_id
+    return "year_end AS (
+        SELECT fiscal_year, membership_type_id, counted, year_end_date
+        FROM civicrm_membership_year_end_count
       ),
       flows_agg AS (
         SELECT fiscal_year, membership_type_id,

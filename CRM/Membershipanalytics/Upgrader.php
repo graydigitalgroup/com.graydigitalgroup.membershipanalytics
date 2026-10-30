@@ -211,6 +211,19 @@ final class CRM_Membershipanalytics_Upgrader extends \CRM_Extension_Upgrader_Bas
     return TRUE;
   }
 
+  /**
+   * Add the materialized counted-population table (MembershipYearEndCount) from its schema
+   * definition. Populated by MembershipYearEndFlow.Rebuild; the reconciliation views read it for
+   * opening/current instead of re-scanning the snapshot on every query.
+   */
+  public function upgrade_1302(): bool {
+    $this->ctx->log->info('Applying update 1302 - add civicrm_membership_year_end_count');
+    if (!E::schema()->tableExists('civicrm_membership_year_end_count')) {
+      E::schema()->createEntityTable('schema/MembershipYearEndCount.entityType.php');
+    }
+    return TRUE;
+  }
+
   // public function upgrade_4203(): bool {
   //   $this->ctx->log->info('Planning update 4203'); // PEAR Log interface
 
