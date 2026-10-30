@@ -50,7 +50,13 @@ class MembershipTrend extends Generic\SqlView {
    * concurrent cache rebuilds: one process recreates the view, a second — past its own no-op
    * DROP — then fatals with 1050 "already exists" on its CREATE. The view stays valid (the
    * loser only logs), so it is harmless noise, but a single CREATE OR REPLACE avoids the
-   * drop-then-create window entirely. The SELECT/FROM assembly mirrors the parent.
+   * drop-then-create window entirely.
+   *
+   * The per-period aggregate is defined once as a CTE and self-joined for the current, prior-month
+   * and prior-year rows. Inlining it three times (as plain derived tables) makes MySQL 8 materialize
+   * and re-scan the full-snapshot aggregate for each join — tens of seconds on a large snapshot —
+   * whereas a single CTE is materialized once and the self-joins are keyed. MariaDB optimizes either
+   * form; this keeps both fast.
    *
    * @internal
    */
@@ -62,7 +68,8 @@ class MembershipTrend extends Generic\SqlView {
     }
     $select = implode(', ', $selects);
     $from = static::viewFrom();
-    \CRM_Core_DAO::executeQuery("CREATE OR REPLACE VIEW `$viewName` AS SELECT $select $from");
+    $cte = static::aggCte();
+    \CRM_Core_DAO::executeQuery("CREATE OR REPLACE VIEW `$viewName` AS WITH $cte SELECT $select $from");
   }
 
   protected static function viewSelect(): array {
@@ -95,14 +102,13 @@ class MembershipTrend extends Generic\SqlView {
   }
 
   protected static function viewFrom(): string {
-    $agg = self::aggSubquery();
-    return "FROM $agg cur
-      LEFT JOIN $agg pm
+    return "FROM agg cur
+      LEFT JOIN agg pm
         ON pm.membership_type_id = cur.membership_type_id
        AND pm.status_bucket = cur.status_bucket
        AND pm.period = cur.period
        AND pm.period_end = LAST_DAY(cur.period_end - INTERVAL 1 MONTH)
-      LEFT JOIN $agg py
+      LEFT JOIN agg py
         ON py.membership_type_id = cur.membership_type_id
        AND py.status_bucket = cur.status_bucket
        AND py.period = cur.period
@@ -110,15 +116,18 @@ class MembershipTrend extends Generic\SqlView {
   }
 
   /**
-   * The per-period aggregate used three times (current, prior month, prior year). One row per
-   * period_end × category × bucket, counting all rows and the counted-as-member subset.
+   * The per-period aggregate, defined once as a CTE and self-joined for current/prior-month/
+   * prior-year. One row per period_end × category × bucket, counting all rows and the
+   * counted-as-member subset.
    */
-  private static function aggSubquery(): string {
-    return "(SELECT period, period_end, fiscal_year, calendar_year, membership_type_id, status_bucket,
-                    COUNT(*) AS members,
-                    COALESCE(SUM(counts_as_member), 0) AS counted
-             FROM civicrm_membership_snapshot
-             GROUP BY period, period_end, fiscal_year, calendar_year, membership_type_id, status_bucket)";
+  private static function aggCte(): string {
+    return "agg AS (
+      SELECT period, period_end, fiscal_year, calendar_year, membership_type_id, status_bucket,
+             COUNT(*) AS members,
+             COALESCE(SUM(counts_as_member), 0) AS counted
+      FROM civicrm_membership_snapshot
+      GROUP BY period, period_end, fiscal_year, calendar_year, membership_type_id, status_bucket
+    )";
   }
 
 }
