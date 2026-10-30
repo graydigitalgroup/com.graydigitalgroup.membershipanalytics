@@ -46,7 +46,8 @@ class Backfill extends \Civi\Api4\Generic\AbstractAction {
   protected $toDate = 'now';
 
   /**
-   * Delete existing backfilled events in the range before rebuilding.
+   * Retained for API compatibility. A backfill now always clears this source's prior events before
+   * rebuilding (see _run), so a re-run never duplicates regardless of this flag.
    *
    * @var bool
    */
@@ -68,13 +69,23 @@ class Backfill extends \Civi\Api4\Generic\AbstractAction {
     $from = $this->fromDate ?: $this->earliestLogDate();
     $to = date('Y-m-d H:i:s', strtotime($this->toDate) ?: time());
 
-    $sourceId = $this->optionValues('membershipanalytics_source')['log_backfill'];
-    if ($this->replace) {
-      // Full rebuild: clear all prior log-backfill events. A range-bounded delete
-      // would leave duplicates, since joined events may be dated before the processed
-      // range (they use the membership's join_date).
-      \CRM_Core_DAO::executeQuery('DELETE FROM civicrm_membership_event WHERE source = %1', [1 => [$sourceId, 'Integer']]);
+    $sourceId = $this->optionValues('membershipanalytics_source')['log_backfill'] ?? NULL;
+    if (!$sourceId) {
+      // Fail fast rather than writing events with source 0: on a fresh install the backfill must not run
+      // until the membershipanalytics_source option values have synced. Flush caches after enabling the
+      // extension, then retry.
+      throw new \CRM_Core_Exception('Membership event source "log_backfill" is not configured yet; flush caches after enabling the extension, then retry the backfill.');
     }
+    // A backfill always regenerates this source's events from the full membership log, so clear the prior
+    // backfill events first; otherwise a re-run appends a duplicate set. Also clear any legacy orphans
+    // written with source 0/NULL before the source option values resolved. Unconditional (not gated on
+    // $replace) so a re-run is always safe; a range-bounded delete would miss joined events dated before
+    // the range (they use the membership's join_date). Live hook/order_complete/activity sources are left
+    // untouched.
+    \CRM_Core_DAO::executeQuery(
+      'DELETE FROM civicrm_membership_event WHERE source = %1 OR source = 0 OR source IS NULL',
+      [1 => [$sourceId, 'Integer']]
+    );
 
     $classification = Config::getStatusClassification();
     $eventTypeId = $this->optionValues('membership_event_type');
