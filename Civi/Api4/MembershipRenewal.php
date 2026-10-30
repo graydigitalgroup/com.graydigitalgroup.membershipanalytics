@@ -85,15 +85,18 @@ class MembershipRenewal extends Generic\SqlView {
 
   /**
    * The per-year-end aggregates, defined once as chained CTEs so MySQL 8 materializes each a single
-   * time. The prior-year comparison self-joins counted_ye (cur vs prev); inlining it as plain derived
-   * tables made MySQL 8 re-aggregate the whole snapshot for every reference — tens of seconds. MariaDB
-   * optimizes either form.
+   * time. The prior-year comparison uses a LAG window over counted_ye, not a self-join: counted_ye has
+   * one row per counted membership per year (tens of thousands), so a cur/prev self-join is a huge
+   * nested loop that MySQL 8 runs for ~50s (MariaDB keys it and stays fast). LAG does the same in one
+   * sorted pass.
    *
    * - last_period: the latest snapshot date in each fiscal year (the year-end instant).
    * - counted_ye: one counted row per membership at its fiscal year-end, with its term end_date.
    * - year_end: counted members per category at each fiscal year-end.
-   * - pairs: members counted at both this and the prior year-end in the same category, split into
-   *   renewed (term end_date advanced) vs continued (unchanged).
+   * - pairs: for each membership, LAG gives the same membership+category's prior counted year and its
+   *   end_date. A pair counts only when that prior year is exactly the year before (prev_fy = fy - 1),
+   *   then splits into renewed (end_date advanced) vs continued (unchanged) — matching the old self-join
+   *   on (membership_id, membership_type_id, fiscal_year - 1).
    */
   private static function aggCte(): string {
     return "last_period AS (
@@ -114,15 +117,18 @@ class MembershipRenewal extends Generic\SqlView {
         GROUP BY s.fiscal_year, s.membership_type_id
       ),
       pairs AS (
-        SELECT cur.fiscal_year, cur.membership_type_id,
-               COALESCE(SUM(cur.end_date > prev.end_date), 0) AS renewed,
-               COUNT(*) - COALESCE(SUM(cur.end_date > prev.end_date), 0) AS continued
-        FROM counted_ye cur
-        JOIN counted_ye prev
-          ON prev.membership_id = cur.membership_id
-         AND prev.membership_type_id = cur.membership_type_id
-         AND prev.fiscal_year = cur.fiscal_year - 1
-        GROUP BY cur.fiscal_year, cur.membership_type_id
+        SELECT fiscal_year, membership_type_id,
+               COALESCE(SUM(prev_fy = fiscal_year - 1 AND end_date > prev_end), 0) AS renewed,
+               COALESCE(SUM(prev_fy = fiscal_year - 1), 0)
+                 - COALESCE(SUM(prev_fy = fiscal_year - 1 AND end_date > prev_end), 0) AS continued
+        FROM (
+          SELECT fiscal_year, membership_type_id, end_date,
+                 LAG(fiscal_year) OVER w AS prev_fy,
+                 LAG(end_date) OVER w AS prev_end
+          FROM counted_ye
+          WINDOW w AS (PARTITION BY membership_id, membership_type_id ORDER BY fiscal_year)
+        ) lagged
+        GROUP BY fiscal_year, membership_type_id
       )";
   }
 
