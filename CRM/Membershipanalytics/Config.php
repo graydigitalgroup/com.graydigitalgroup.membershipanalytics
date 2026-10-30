@@ -376,6 +376,16 @@ class CRM_Membershipanalytics_Config {
   }
 
   /**
+   * Pseudoconstant options for MembershipYearEndFlow.basis.
+   */
+  public static function reconBasisOptions(): array {
+    return [
+      'net' => ts('Net (year-end position)'),
+      'gross' => ts('Gross (every movement)'),
+    ];
+  }
+
+  /**
    * Movement reason for a membership's prior status (on entry) and next status (on exit).
    *
    * entry: the status a membership held BEFORE it crossed into counting → 'new' | 'reactivated'

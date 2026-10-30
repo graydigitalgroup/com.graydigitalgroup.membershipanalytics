@@ -195,11 +195,29 @@ final class CRM_Membershipanalytics_Upgrader extends \CRM_Extension_Upgrader_Bas
         membership_type_id int unsigned NULL COMMENT 'Category the flow applies to',
         flow varchar(16) NULL COMMENT 'entered | exited | transfer_in | transfer_out',
         reason varchar(16) NULL COMMENT 'Entry/exit reason; null for transfers',
+        basis varchar(8) NULL COMMENT 'net | gross',
         PRIMARY KEY (id),
-        INDEX index_fiscal_year_type (fiscal_year, membership_type_id),
+        INDEX index_basis_fy_type (basis, fiscal_year, membership_type_id),
         INDEX index_membership (membership_id),
         INDEX index_flow (flow)
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+    }
+    return TRUE;
+  }
+
+  /**
+   * Add the basis column (net | gross) to an already-created fact table, so one fact serves both
+   * reconciliation bases. No-op on a fresh install where upgrade_1300 already created it.
+   */
+  public function upgrade_1301(): bool {
+    $this->ctx->log->info('Applying update 1301 - add basis to civicrm_membership_year_end_flow');
+    $hasCol = CRM_Core_DAO::executeQuery("SHOW COLUMNS FROM civicrm_membership_year_end_flow LIKE 'basis'");
+    if (!$hasCol->fetch()) {
+      CRM_Core_DAO::executeQuery("ALTER TABLE civicrm_membership_year_end_flow ADD COLUMN basis varchar(8) NULL COMMENT 'net | gross' AFTER reason");
+    }
+    $hasIdx = CRM_Core_DAO::executeQuery("SHOW INDEX FROM civicrm_membership_year_end_flow WHERE Key_name = 'index_basis_fy_type'");
+    if (!$hasIdx->fetch()) {
+      CRM_Core_DAO::executeQuery("ALTER TABLE civicrm_membership_year_end_flow ADD INDEX index_basis_fy_type (basis, fiscal_year, membership_type_id)");
     }
     return TRUE;
   }

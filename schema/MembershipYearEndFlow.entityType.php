@@ -80,10 +80,19 @@ return [
         'callback' => 'CRM_Membershipanalytics_Config::reconReasonOptions',
       ],
     ],
+    'basis' => [
+      'title' => E::ts('Basis'),
+      'sql_type' => 'varchar(8)',
+      'input_type' => 'Select',
+      'description' => E::ts('net (year-end boundary) | gross (every movement during the year)'),
+      'pseudoconstant' => [
+        'callback' => 'CRM_Membershipanalytics_Config::reconBasisOptions',
+      ],
+    ],
   ],
   'getIndices' => fn() => [
-    'index_fiscal_year_type' => [
-      'fields' => ['fiscal_year' => TRUE, 'membership_type_id' => TRUE],
+    'index_basis_fy_type' => [
+      'fields' => ['basis' => TRUE, 'fiscal_year' => TRUE, 'membership_type_id' => TRUE],
       'unique' => FALSE,
     ],
     'index_membership' => [

@@ -140,6 +140,7 @@ class MembershipReconciliationNet extends Generic\SqlView {
                SUM(flow = 'transfer_in') AS transfer_in,
                SUM(flow = 'transfer_out') AS transfer_out
         FROM civicrm_membership_year_end_flow
+        WHERE basis = 'net'
         GROUP BY fiscal_year, membership_type_id
       )";
   }
