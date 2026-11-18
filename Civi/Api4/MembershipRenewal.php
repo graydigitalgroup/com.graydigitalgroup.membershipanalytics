@@ -7,19 +7,25 @@ namespace Civi\Api4;
  *
  * One row per fiscal_year × membership_type_id splitting the counted members at the fiscal
  * year-end into:
- *  - renewed: counted at both this and the prior year-end in the same category, with the term
- *    extended during the year (end_date advanced) — i.e. they paid to renew.
- *  - continued: counted at both year-ends in the same category with no term extension — still
- *    inside an existing (often multi-year or no-end) term, e.g. Honorary/Emeritus/Junior.
+ *  - renewed: counted at both this and the prior year-end in the same category, in a renewal-eligible
+ *    type, with the term extended during the year (end_date advanced). Which types are eligible is
+ *    configurable (see below); by default every type is.
+ *  - continued: counted at both year-ends in the same category with either no term extension, or an
+ *    extension in a type that is not renewal-eligible. For such a type an advancing end_date is a
+ *    continuation, not a renewal — e.g. a free type whose term was extended administratively (a CNS
+ *    Junior training extension) rather than paid for.
  *  - added: everyone else counted this year-end (first-time joins, reactivations, reinstatements
  *    and transfers into the category) = total − renewed − continued.
  *
  * renewed + continued + added = total_counted, so the three columns are a full composition of
- * the year-end count. "Renewed" keys off the term end_date advancing rather than an event label,
- * so a member who renews twice in a year is still counted once.
+ * the year-end count. "Renewed" keys off the term end_date advancing (for a renewal-eligible type)
+ * rather than an event label, so a member who renews twice in a year is still counted once.
  *
  * Client-agnostic: counting and the fiscal year-end come from the snapshot; a report filters to
- * its reportable categories. Mirrors the other analytics views.
+ * its reportable categories. Which types may be counted as renewed is resolved through
+ * CRM_Membershipanalytics_Config::renewableTypeIds (default: all types; narrow it via the
+ * civi.membershipanalytics.renewalEligibility event or the membershipanalytics_renewable_type_ids
+ * setting). Mirrors the other analytics views.
  *
  * @searchable secondary
  * @package Civi\Api4
@@ -95,10 +101,13 @@ class MembershipRenewal extends Generic\SqlView {
    * - year_end: counted members per category at each fiscal year-end.
    * - pairs: for each membership, LAG gives the same membership+category's prior counted year and its
    *   end_date. A pair counts only when that prior year is exactly the year before (prev_fy = fy - 1),
-   *   then splits into renewed (end_date advanced) vs continued (unchanged) — matching the old self-join
-   *   on (membership_id, membership_type_id, fiscal_year - 1).
+   *   then splits into renewed (end_date advanced, renewal-eligible type) vs continued (unchanged, or
+   *   advanced in a non-renewable type) — matching the old self-join on (membership_id, type, fy - 1).
    */
   private static function aggCte(): string {
+    // Which types count as renewed when their term is extended. Default is every type; a site can
+    // narrow it (e.g. CNS limits it to paid types) via the renewalEligibility event or setting.
+    $renewable = \CRM_Membershipanalytics_Config::renewableTypeSqlPredicate('membership_type_id');
     return "last_period AS (
         SELECT fiscal_year, MAX(period_end) AS pe
         FROM civicrm_membership_snapshot GROUP BY fiscal_year
@@ -118,9 +127,9 @@ class MembershipRenewal extends Generic\SqlView {
       ),
       pairs AS (
         SELECT fiscal_year, membership_type_id,
-               COALESCE(SUM(prev_fy = fiscal_year - 1 AND end_date > prev_end), 0) AS renewed,
+               COALESCE(SUM(prev_fy = fiscal_year - 1 AND end_date > prev_end AND ($renewable)), 0) AS renewed,
                COALESCE(SUM(prev_fy = fiscal_year - 1), 0)
-                 - COALESCE(SUM(prev_fy = fiscal_year - 1 AND end_date > prev_end), 0) AS continued
+                 - COALESCE(SUM(prev_fy = fiscal_year - 1 AND end_date > prev_end AND ($renewable)), 0) AS continued
         FROM (
           SELECT fiscal_year, membership_type_id, end_date,
                  LAG(fiscal_year) OVER w AS prev_fy,

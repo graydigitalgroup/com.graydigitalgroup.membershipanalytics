@@ -558,4 +558,69 @@ class CRM_Membershipanalytics_Config {
     return self::getStatusClassification()[$statusId] ?? 'lapsed';
   }
 
+  /**
+   * Which membership types count as "renewed" when their term end_date advances between two
+   * consecutive year-ends. A type NOT in this list has its end_date advances reported as
+   * "continued" (a term extension), never as a renewal.
+   *
+   * Default: NULL, meaning every type is renewable (any term extension is a renewal) — the
+   * client-agnostic behavior. A site where some types are extended without a paid renewal (e.g.
+   * CNS, whose free types can be extended administratively) narrows this one of two ways:
+   *   1. The civi.membershipanalytics.renewalEligibility event, which receives each type's id,
+   *      name and minimum_fee so a subscriber can decide by fee, or
+   *   2. The membershipanalytics_renewable_type_ids setting (an explicit type-id list, which wins).
+   *
+   * @return array<int>|null  Renewable type ids, or NULL for "all types renewable".
+   */
+  public static function renewableTypeIds(): ?array {
+    if (array_key_exists('renewableTypeIds', \Civi::$statics[__CLASS__] ?? [])) {
+      return \Civi::$statics[__CLASS__]['renewableTypeIds'];
+    }
+
+    // Type metadata for subscribers to decide by. Raw SQL, not APIv4: this is also called while
+    // the SQL views are (re)built during the APIv4 entityTypes rebuild, where an APIv4 call would
+    // re-enter that rebuild and recurse.
+    $types = [];
+    $dao = \CRM_Core_DAO::executeQuery('SELECT id, name, minimum_fee FROM civicrm_membership_type');
+    while ($dao->fetch()) {
+      $types[(int) $dao->id] = ['name' => $dao->name, 'minimum_fee' => (float) $dao->minimum_fee];
+    }
+
+    // Default: all types renewable (NULL). A subscriber may replace renewableTypeIds with a list.
+    $renewable = NULL;
+    $event = \Civi\Core\Event\GenericHookEvent::create([
+      'renewableTypeIds' => &$renewable,
+      'membershipTypes' => $types,
+    ]);
+    \Civi::dispatcher()->dispatch('civi.membershipanalytics.renewalEligibility', $event);
+
+    // Manual setting override (explicit type-id list) wins.
+    $override = \Civi::settings()->get('membershipanalytics_renewable_type_ids');
+    if (is_array($override)) {
+      $renewable = $override;
+    }
+
+    $renewable = is_array($renewable)
+      ? array_values(array_unique(array_map('intval', $renewable)))
+      : NULL;
+
+    \Civi::$statics[__CLASS__]['renewableTypeIds'] = $renewable;
+    return $renewable;
+  }
+
+  /**
+   * SQL predicate, TRUE when a membership of the given type-id column may be counted as renewed.
+   * "1" when all types are renewable; "0" when none are. For use in the renewal view's SQL.
+   */
+  public static function renewableTypeSqlPredicate(string $typeIdColumn = 'membership_type_id'): string {
+    $ids = self::renewableTypeIds();
+    if ($ids === NULL) {
+      return '1';
+    }
+    if ($ids === []) {
+      return '0';
+    }
+    return "$typeIdColumn IN (" . implode(',', $ids) . ')';
+  }
+
 }
